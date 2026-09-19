@@ -6,7 +6,7 @@ from aiogram.types import CallbackQuery, Message
 
 from bot.keyboards.common import inline
 from bot.services.store import Store
-from bot.services.telegram import caption, navigate, target_id
+from bot.services.telegram import caption, target_id
 from bot.services.validation import RuleError
 
 router = Router(name="admin")
@@ -58,12 +58,11 @@ async def admin_callback(callback: CallbackQuery, store: Store) -> None:
         if navigation:
             rows.append(tuple(navigation))
         rows.append((("🏠 В меню", "home"),))
-        await navigate(
-            callback,
+        await callback.message.answer(
             f"<b>⚠️ Открытые жалобы</b>\nСтраница {page + 1}"
             if reports
             else "<b>Открытых жалоб нет</b>",
-            inline(*rows),
+            reply_markup=inline(*rows),
         )
         return
     report_id = target_id(raw_id)
@@ -77,29 +76,20 @@ async def admin_callback(callback: CallbackQuery, store: Store) -> None:
             (("Рассмотрено", f"admin:review:{report_id}"),),
             (("⚠️ Жалобы", "admin:list:0"),),
         )
-        report_text = (
+        await callback.message.answer(
             f"<b>Жалоба #{report.id}</b>\nПричина: {escape(report.reason)}\n"
-            f"Статус: {'открыта' if report.status == 'pending' else 'рассмотрена'}"
+            f"Статус: {'открыта' if report.status == 'pending' else 'рассмотрена'}",
+            reply_markup=keyboard,
         )
         if profile:
-            await navigate(
-                callback,
-                report_text + "\n\n" + caption(profile),
-                keyboard,
-                photo=profile.photo_file_id,
-            )
+            await callback.message.answer_photo(profile.photo_file_id, caption=caption(profile))
         else:
-            await navigate(
-                callback,
-                report_text + "\n\nТекущая анкета удалена, но запись модерации сохранена.",
-                keyboard,
-            )
+            await callback.message.answer("Текущая анкета удалена, но запись модерации сохранена.")
     elif action in {"ban", "unban", "review"}:
         await store.admin_action(callback.from_user.id, report_id, action)
-        await navigate(
-            callback,
+        await callback.message.answer(
             "<b>Действие выполнено</b>\nСнятие блокировки не активирует анкету автоматически.",
-            inline((("⚠️ Жалобы", "admin:list:0"),)),
+            reply_markup=inline((("⚠️ Жалобы", "admin:list:0"),)),
         )
     else:
         raise RuleError("Недопустимое действие администратора.")

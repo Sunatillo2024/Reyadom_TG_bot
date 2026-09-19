@@ -5,7 +5,7 @@ from aiogram.types import CallbackQuery, Message
 from bot.db.models import User
 from bot.keyboards.common import home, inline
 from bot.services.store import Store
-from bot.services.telegram import navigate, target_id
+from bot.services.telegram import safe_call, target_id
 from bot.services.validation import RuleError
 from bot.states import Complaint
 
@@ -22,12 +22,14 @@ REASONS = {
 async def block(callback: CallbackQuery, store: Store, user: User) -> None:
     target = target_id(callback.data.split(":", 1)[1])
     await store.block(user.id, target)
-    await navigate(
-        callback,
+    await safe_call(
+        store, user.telegram_id, lambda: callback.message.edit_reply_markup(reply_markup=None)
+    )
+    await callback.message.answer(
         "<b>Пользователь заблокирован</b>\n"
         "Анкеты больше не будут видны друг другу в боте, а контакт станет недоступен.\n\n"
         "<i>В личном чате Telegram пользователя можно заблокировать отдельно.</i>",
-        home(),
+        reply_markup=home(),
     )
 
 
@@ -40,25 +42,20 @@ async def report_begin(
     await state.clear()
     await state.set_state(Complaint.reason)
     await state.update_data(target=target)
-    reason_rows = [((label, f"reason:{key}"),) for key, label in REASONS.items()]
-    await navigate(
-        callback,
+    await callback.message.answer(
         "<b>Почему ты хочешь пожаловаться?</b>\nВыбери причину ниже.\n\n<i>/cancel — отмена.</i>",
-        inline(*reason_rows, (("Отмена", "home:cancel"),)),
+        reply_markup=inline(*[((label, f"reason:{key}"),) for key, label in REASONS.items()]),
     )
 
 
-async def confirm_prompt(
-    event: Message | CallbackQuery, state: FSMContext, reason: str
-) -> None:
+async def confirm_prompt(message: Message, state: FSMContext, reason: str) -> None:
     await state.update_data(reason=reason)
     await state.set_state(Complaint.confirm)
-    await navigate(
-        event,
+    await message.answer(
         "<b>Отправить жалобу?</b>\n"
         "Её увидят администраторы, а анкета будет заблокирована для тебя. "
         "Пользователь не узнает, кто отправил жалобу.",
-        inline(
+        reply_markup=inline(
             (("Отправить жалобу", "reportconfirm", "danger"),),
             (("Отмена", "home:cancel"),),
         ),
@@ -72,15 +69,13 @@ async def reason(callback: CallbackQuery, state: FSMContext) -> None:
         raise RuleError("Выбери причину с помощью кнопки.")
     if key == "other":
         await state.set_state(Complaint.comment)
-        await navigate(
-            callback,
+        await callback.message.answer(
             "<b>Опиши причину</b>\n"
             "Напиши комментарий длиной от 1 до 300 символов.\n\n"
-            "<i>/cancel — отмена.</i>",
-            inline((("Отмена", "home:cancel"),)),
+            "<i>/cancel — отмена.</i>"
         )
     else:
-        await confirm_prompt(callback, state, REASONS[key])
+        await confirm_prompt(callback.message, state, REASONS[key])
 
 
 @router.message(Complaint.comment)
@@ -98,8 +93,9 @@ async def report_confirm(
     draft = await state.get_data()
     await store.report(user.id, draft["target"], draft["reason"])
     await state.clear()
-    await navigate(
-        callback,
-        "<b>Жалоба сохранена</b>\nАнкета заблокирована для тебя.",
-        home(),
+    await safe_call(
+        store, user.telegram_id, lambda: callback.message.edit_reply_markup(reply_markup=None)
+    )
+    await callback.message.answer(
+        "<b>Жалоба сохранена</b>\nАнкета заблокирована для тебя.", reply_markup=home()
     )

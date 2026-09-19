@@ -27,10 +27,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from bot.config import Settings
 from bot.db.database import Database
 from bot.handlers import admin, discovery, matches, moderation, profile, registration, start
-from bot.keyboards.common import inline
 from bot.middlewares.access import AccessMiddleware
 from bot.services.store import Store
-from bot.services.telegram import navigate
 
 logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -94,10 +92,8 @@ def create_dispatcher(store: Store) -> Dispatcher:
 
     @fallback.callback_query()
     async def stale(callback: CallbackQuery) -> None:
-        await navigate(
-            callback,
-            "Кнопка устарела или недействительна. Продолжи с помощью /start.",
-            inline((("🏠 В меню", "home"),)),
+        await callback.message.answer(
+            "Кнопка устарела или недействительна. Продолжи с помощью /start."
         )
 
     @fallback.message()

@@ -5,16 +5,7 @@ from unittest.mock import AsyncMock
 
 from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
-from aiogram.methods import (
-    AnswerCallbackQuery,
-    EditMessageCaption,
-    EditMessageMedia,
-    EditMessageReplyMarkup,
-    EditMessageText,
-    GetChat,
-    SendMessage,
-    SendPhoto,
-)
+from aiogram.methods import AnswerCallbackQuery, GetChat, SendMessage, SendPhoto
 from aiogram.types import Chat, ChatFullInfo, Location, Message, PhotoSize, Update, User
 from sqlalchemy import select
 
@@ -29,97 +20,18 @@ async def test_full_dispatcher_flow_offline(store, make_user, monkeypatch):
     bot = Bot("123456:OFFLINE_TEST_TOKEN", default=DefaultBotProperties(parse_mode="HTML"))
     calls = []
     sequence = count(1)
-    messages: dict[tuple[int, int], Message] = {}
-    latest: dict[int, Message] = {}
-
-    def bot_message(
-        chat_id,
-        message_id,
-        *,
-        text=None,
-        caption=None,
-        photo_id=None,
-        reply_markup=None,
-    ):
-        result = Message(
-            message_id=message_id,
-            date=datetime.now(UTC),
-            chat=Chat(id=int(chat_id), type="private"),
-            from_user=User(id=123456, is_bot=True, first_name="Bot"),
-            text=text,
-            caption=caption,
-            photo=(
-                [
-                    PhotoSize(
-                        file_id=str(photo_id),
-                        file_unique_id="bot-photo",
-                        width=640,
-                        height=640,
-                    )
-                ]
-                if photo_id
-                else None
-            ),
-            reply_markup=reply_markup,
-        )
-        result.as_(bot)
-        messages[(int(chat_id), message_id)] = result
-        latest[int(chat_id)] = result
-        return result
 
     async def request(_bot, method, **_kwargs):
         calls.append(method)
-        if isinstance(method, SendMessage):
-            return bot_message(
-                method.chat_id,
-                next(sequence),
-                text=method.text,
+        if isinstance(method, (SendMessage, SendPhoto)):
+            return Message(
+                message_id=next(sequence),
+                date=datetime.now(UTC),
+                chat=Chat(id=int(method.chat_id), type="private"),
+                text=getattr(method, "text", None),
                 reply_markup=(
-                    method.reply_markup
-                    if hasattr(method.reply_markup, "inline_keyboard")
-                    else None
+                    method.reply_markup if hasattr(method.reply_markup, "inline_keyboard") else None
                 ),
-            )
-        if isinstance(method, SendPhoto):
-            return bot_message(
-                method.chat_id,
-                next(sequence),
-                caption=method.caption,
-                photo_id=method.photo,
-                reply_markup=(
-                    method.reply_markup
-                    if hasattr(method.reply_markup, "inline_keyboard")
-                    else None
-                ),
-            )
-        if isinstance(
-            method, (EditMessageText, EditMessageCaption, EditMessageMedia, EditMessageReplyMarkup)
-        ):
-            current = messages[(int(method.chat_id), method.message_id)]
-            if isinstance(method, EditMessageText):
-                return bot_message(
-                    method.chat_id,
-                    method.message_id,
-                    text=method.text,
-                    reply_markup=method.reply_markup,
-                )
-            if isinstance(method, EditMessageMedia):
-                return bot_message(
-                    method.chat_id,
-                    method.message_id,
-                    caption=method.media.caption,
-                    photo_id=method.media.media,
-                    reply_markup=method.reply_markup,
-                )
-            return bot_message(
-                method.chat_id,
-                method.message_id,
-                text=current.text,
-                caption=(
-                    method.caption if isinstance(method, EditMessageCaption) else current.caption
-                ),
-                photo_id=current.photo[-1].file_id if current.photo else None,
-                reply_markup=method.reply_markup,
             )
         if isinstance(method, GetChat):
             return ChatFullInfo(
@@ -164,15 +76,6 @@ async def test_full_dispatcher_flow_offline(store, make_user, monkeypatch):
         if location:
             payload["location"] = Location(latitude=location[0], longitude=location[1])
         if callback:
-            source = latest.get(actor)
-            if source:
-                payload.update(
-                    message_id=source.message_id,
-                    text=source.text,
-                    caption=source.caption,
-                    photo=source.photo,
-                    reply_markup=source.reply_markup,
-                )
             update = Update(
                 update_id=next(sequence),
                 callback_query={
@@ -187,17 +90,8 @@ async def test_full_dispatcher_flow_offline(store, make_user, monkeypatch):
             update = Update(update_id=next(sequence), message=Message(**payload))
         await dispatcher.feed_update(bot, update)
 
-    def method_text(method):
-        if isinstance(method, (SendMessage, EditMessageText)):
-            return method.text
-        if isinstance(method, (SendPhoto, EditMessageCaption)):
-            return method.caption
-        if isinstance(method, EditMessageMedia):
-            return method.media.caption
-        return None
-
     def last_text():
-        return next(text for method in reversed(calls) if (text := method_text(method)) is not None)
+        return next(method.text for method in reversed(calls) if isinstance(method, SendMessage))
 
     try:
         await feed(text="/start", group=True)
@@ -234,19 +128,6 @@ async def test_full_dispatcher_flow_offline(store, make_user, monkeypatch):
         await feed(text="/start")
         assert "Хорошо, что ты здесь" in last_text()
 
-        # Menu -> section -> back edits one bot message instead of sending more.
-        home_message_id = latest[tid].message_id
-        sent_before_navigation = len(
-            [call for call in calls if isinstance(call, (SendMessage, SendPhoto))]
-        )
-        await feed(callback="profile")
-        assert latest[tid].message_id == home_message_id
-        await feed(callback="home")
-        assert latest[tid].message_id == home_message_id
-        assert len([call for call in calls if isinstance(call, (SendMessage, SendPhoto))]) == (
-            sent_before_navigation
-        )
-
         # Edits don't touch the saved row until valid input is submitted.
         await feed(callback="edit:name")
         await feed(text="/cancel")
@@ -275,20 +156,15 @@ async def test_full_dispatcher_flow_offline(store, make_user, monkeypatch):
         assert "❔ Помощь" in last_text()
         # Existing Uzbek reply keyboards remain usable after the UI translation.
         await feed(text=LEGACY_MENU_LABELS[0])
-        last_photo = next(call for call in reversed(calls) if isinstance(call, SendPhoto))
-        assert "user_" not in last_photo.caption
+        assert isinstance(calls[-1], SendPhoto)
+        assert "user_" not in calls[-1].caption
         await feed(callback=f"react:{other.id}:like:d")
         assert any(
             isinstance(call, SendMessage) and "понравилась твоя анкета" in call.text
             for call in calls
         )
-        duplicate_content_calls = len(
-            [call for call in calls if method_text(call) is not None]
-        )
         await feed(callback=f"react:{other.id}:like:d")
-        assert len([call for call in calls if method_text(call) is not None]) == (
-            duplicate_content_calls
-        )
+        assert "Подожди секунду" in last_text()
         await feed(callback=f"react:{user.id}:like:d", actor=other.telegram_id)
         async with store.db.sessions() as session:
             match_id = await session.scalar(select(Match.id))

@@ -66,24 +66,20 @@ def test_city_and_html():
 
 def test_ui_labels_callbacks_and_button_styles_are_serialized():
     markup = menu()
-    assert [[button.text for button in row] for row in markup.inline_keyboard] == [
+    assert [[button.text for button in row] for row in markup.keyboard] == [
         [MENU_LABELS[0]],
         [MENU_LABELS[1], MENU_LABELS[2]],
         [MENU_LABELS[3]],
         [MENU_LABELS[4], MENU_LABELS[5]],
     ]
+    assert markup.input_field_placeholder == "Выбери действие 💜"
     serialized_menu = markup.model_dump(exclude_none=True)
-    assert serialized_menu["inline_keyboard"][0][0]["style"] == "primary"
+    assert serialized_menu["keyboard"][0][0]["style"] == "primary"
     serialized_request = SendMessage(chat_id=1, text="Меню", reply_markup=markup).model_dump(
         exclude_none=True
     )
-    assert serialized_request["reply_markup"]["inline_keyboard"][0][0]["style"] == "primary"
-    assert all(
-        "style" not in button for row in serialized_menu["inline_keyboard"][1:] for button in row
-    )
-    assert [
-        button.callback_data for row in markup.inline_keyboard for button in row
-    ] == ["discover", "profile", "incoming", "matches:0", "settings", "help"]
+    assert serialized_request["reply_markup"]["keyboard"][0][0]["style"] == "primary"
+    assert all("style" not in button for row in serialized_menu["keyboard"][1:] for button in row)
 
     styled = inline((("Сохранить", "save", "success"),))
     assert styled.model_dump(exclude_none=True)["inline_keyboard"][0][0]["style"] == "success"
