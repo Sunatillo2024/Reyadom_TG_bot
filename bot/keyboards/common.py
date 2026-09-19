@@ -26,18 +26,17 @@ def inline(*rows: tuple[ButtonSpec, ...]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
-def menu() -> ReplyKeyboardMarkup:
-    # aiogram 3.22 forwards Bot API fields it does not yet expose in its signature.
-    # Telegram clients that do not render styles still see the complete action label.
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text=MENU_LABELS[0], style="primary")],
-            [KeyboardButton(text=MENU_LABELS[1]), KeyboardButton(text=MENU_LABELS[2])],
-            [KeyboardButton(text=MENU_LABELS[3])],
-            [KeyboardButton(text=MENU_LABELS[4]), KeyboardButton(text=MENU_LABELS[5])],
-        ],
-        resize_keyboard=True,
-        input_field_placeholder="Выбери действие 💜",
+def menu() -> InlineKeyboardMarkup:
+    """Main navigation.
+
+    Callback buttons keep navigation inside the bot message and do not echo their
+    labels into the chat as user messages.
+    """
+    return inline(
+        ((MENU_LABELS[0], "discover", "primary"),),
+        ((MENU_LABELS[1], "profile"), (MENU_LABELS[2], "incoming")),
+        ((MENU_LABELS[3], "matches:0"),),
+        ((MENU_LABELS[4], "settings"), (MENU_LABELS[5], "help")),
     )
 
 

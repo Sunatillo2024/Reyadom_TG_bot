@@ -68,7 +68,9 @@ class AccessMiddleware(BaseMiddleware):
             if callback and command.startswith("react:"):
                 now = time.monotonic()
                 if now - self.last_decision.get(telegram_id, 0) < 1:
-                    raise RuleError("Подожди секунду и нажми снова.")
+                    # The callback was already acknowledged above. Ignore a rapid
+                    # duplicate without creating an error message in the chat.
+                    return None
                 self.last_decision[telegram_id] = now
                 if len(self.last_decision) > 10_000:
                     self.last_decision = {

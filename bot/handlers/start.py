@@ -7,25 +7,34 @@ from bot import texts
 from bot.db.models import User
 from bot.keyboards.common import inline, menu
 from bot.services.store import Store
+from bot.services.telegram import navigate
 from bot.states import Registration
 
 router = Router(name="start")
 
 
-async def show_home(message: Message, state: FSMContext, store: Store, user: User) -> None:
+async def show_home(
+    event: Message | CallbackQuery, state: FSMContext, store: Store, user: User
+) -> None:
     await state.clear()
     if user.is_banned:
-        await message.answer(
+        await navigate(
+            event,
             "<b>Доступ ограничен</b>\nТы можешь использовать /help, /privacy, /id и /delete.",
-            reply_markup=menu(),
+            menu(),
         )
-    elif await store.profile(user.id):
-        await message.answer(texts.HOME, reply_markup=menu())
+        return
+    profile = await store.profile(user.id)
+    if profile:
+        # Keeping the home screen as a media message lets Telegram replace both
+        # its photo and caption while the user navigates to other profiles.
+        await navigate(event, texts.HOME, menu(), photo=profile.photo_file_id)
     else:
         await state.set_state(Registration.adult)
-        await message.answer(
+        await navigate(
+            event,
             texts.INTRO,
-            reply_markup=inline(
+            inline(
                 (("Мне уже есть 18 лет", "reg:adult", "primary"),),
                 (("Отмена", "home:cancel"),),
             ),
@@ -39,23 +48,21 @@ async def start(message: Message, state: FSMContext, store: Store, user: User) -
 
 @router.callback_query(F.data == "home")
 async def home(callback: CallbackQuery, state: FSMContext, store: Store, user: User) -> None:
-    await show_home(callback.message, state, store, user)
+    await show_home(callback, state, store, user)
 
 
 @router.message(Command("cancel"))
 @router.callback_query(F.data == "home:cancel")
 async def cancel(event: Message | CallbackQuery, state: FSMContext) -> None:
     await state.clear()
-    message = event.message if isinstance(event, CallbackQuery) else event
-    await message.answer(
-        "Действие отменено. Сохранённая анкета не изменилась.", reply_markup=menu()
-    )
+    await navigate(event, "Действие отменено. Сохранённая анкета не изменилась.", menu())
 
 
 @router.message(Command("help"))
 @router.message(F.text.in_(texts.MENU_LABEL_ALIASES[5]))
-async def help_message(message: Message) -> None:
-    await message.answer(texts.HELP)
+@router.callback_query(F.data == "help")
+async def help_message(event: Message | CallbackQuery) -> None:
+    await navigate(event, texts.HELP, inline((("🏠 В меню", "home"),)))
 
 
 @router.message(Command("privacy"))
@@ -73,10 +80,10 @@ async def own_id(message: Message) -> None:
 async def delete_prompt(event: Message | CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await state.update_data(delete_requested=True)
-    message = event.message if isinstance(event, CallbackQuery) else event
-    await message.answer(
+    await navigate(
+        event,
         texts.DELETE_NOTICE,
-        reply_markup=inline(
+        inline(
             (("Да, удалить", "delete:yes", "danger"),), (("Отмена", "home:cancel"),)
         ),
     )
@@ -87,12 +94,17 @@ async def delete_confirm(
     callback: CallbackQuery, state: FSMContext, store: Store, user: User
 ) -> None:
     if not (await state.get_data()).get("delete_requested"):
-        await callback.message.answer("Подтверждение устарело. Начни заново с /delete.")
+        await navigate(
+            callback,
+            "Подтверждение устарело. Начни заново с /delete.",
+            inline((("🏠 В меню", "home"),)),
+        )
         return
     await store.delete_profile(user.id)
     await state.clear()
-    await callback.message.answer(
+    await navigate(
+        callback,
         "<b>Анкета удалена</b>\n"
         "Связанные реакции и взаимные симпатии удалены. Записи модерации сохранены.",
-        reply_markup=menu(),
+        menu(),
     )

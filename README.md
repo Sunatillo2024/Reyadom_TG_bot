@@ -54,6 +54,12 @@ Anketa faqat tasdiqlangach bazaga yoziladi. Qidiruv har ikki tomonning yosh va j
 
 Asosiy menyu:
 
+Menyu inline tugmalar bilan ishlaydi: bo'lim, profil, sozlamalar va «orqaga» bosilganda
+bot yangi xabar qo'shmaydi, mavjud menyu xabarining matni, rasmi va tugmalarini yangilaydi.
+Eski yoki tahrirlab bo'lmaydigan xabar uchrasa, bot uning tugmalarini o'chirishga urinib,
+bitta yangi faol menyu yaratadi. Matn, geolokatsiya yoki rasm kiritiladigan forma bosqichlari
+alohida xabar yuborishi mumkin.
+
 - 🔎 Anketalarni ko'rish — bir safar bitta rasmli anketa, eng yaqinidan uzoqrog'iga saralash, like/pass, bloklash va shikoyat.
 - 👤 Mening anketam — alohida maydonlarni tahrirlash, yashirish/faollashtirish va o'chirish.
 - ❤️ Menga like bosganlar — javob kutayotgan, hali ham mos va faol anketalar.
