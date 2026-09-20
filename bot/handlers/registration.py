@@ -24,6 +24,8 @@ async def request_name(message: Message, state: FSMContext) -> None:
 
 @router.callback_query(Registration.adult, F.data == "reg:adult")
 async def adult(callback: CallbackQuery, state: FSMContext) -> None:
+    if not isinstance(callback.message, Message):
+        return
     await state.set_state(Registration.consent)
     await callback.message.answer(
         texts.CONSENT,
@@ -36,6 +38,8 @@ async def adult(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(Registration.consent, F.data == "reg:consent")
 async def consent(callback: CallbackQuery, state: FSMContext, user: User) -> None:
+    if not isinstance(callback.message, Message):
+        return
     await state.update_data(consent_at=utcnow())
     if user.username:
         await request_name(callback.message, state)
@@ -48,6 +52,8 @@ async def consent(callback: CallbackQuery, state: FSMContext, user: User) -> Non
 
 @router.callback_query(Registration.username, F.data == "reg:username")
 async def username(callback: CallbackQuery, state: FSMContext, user: User) -> None:
+    if not isinstance(callback.message, Message):
+        return
     if user.username:
         await request_name(callback.message, state)
     else:
@@ -58,6 +64,8 @@ async def username(callback: CallbackQuery, state: FSMContext, user: User) -> No
 
 @router.message(Registration.name, F.text)
 async def name(message: Message, state: FSMContext) -> None:
+    if message.text is None:
+        return
     await state.update_data(name=clean_text(message.text, 2, 40))
     await state.set_state(Registration.age)
     await message.answer("<b>Сколько тебе лет?</b>\nОтправь возраст целым числом от 18 до 99.")
@@ -65,6 +73,8 @@ async def name(message: Message, state: FSMContext) -> None:
 
 @router.message(Registration.age, F.text)
 async def age(message: Message, state: FSMContext) -> None:
+    if message.text is None:
+        return
     await state.update_data(age=age_value(message.text))
     await state.set_state(Registration.gender)
     await message.answer("<b>Укажи свой пол</b>", reply_markup=genders("reg:gender"))
@@ -72,6 +82,8 @@ async def age(message: Message, state: FSMContext) -> None:
 
 @router.callback_query(Registration.gender, F.data.startswith("reg:gender:"))
 async def gender(callback: CallbackQuery, state: FSMContext) -> None:
+    if callback.data is None:
+        return
     value = callback.data.rsplit(":", 1)[-1]
     if value not in {"male", "female"}:
         raise RuleError("Выбери пол с помощью кнопки.")
@@ -84,6 +96,8 @@ async def gender(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(Registration.seeking, F.data.startswith("reg:seeking:"))
 async def seeking(callback: CallbackQuery, state: FSMContext) -> None:
+    if callback.data is None or not isinstance(callback.message, Message):
+        return
     value = callback.data.rsplit(":", 1)[-1]
     if value not in {"male", "female", "any"}:
         raise RuleError("Нажми одну из кнопок.")
@@ -100,6 +114,8 @@ async def seeking(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(Registration.location, F.location)
 async def location(message: Message, state: FSMContext) -> None:
+    if message.location is None:
+        return
     await state.update_data(
         latitude=message.location.latitude,
         longitude=message.location.longitude,
@@ -127,17 +143,21 @@ async def request_photo(message: Message, state: FSMContext, bio: str) -> None:
 
 @router.message(Registration.bio, F.text)
 async def bio(message: Message, state: FSMContext) -> None:
+    if message.text is None:
+        return
     await request_photo(message, state, clean_text(message.text, 0, 300))
 
 
 @router.callback_query(Registration.bio, F.data == "reg:skip")
 async def skip(callback: CallbackQuery, state: FSMContext) -> None:
+    if not isinstance(callback.message, Message):
+        return
     await request_photo(callback.message, state, "")
 
 
 @router.message(Registration.photo, F.photo)
 async def photo(message: Message, state: FSMContext) -> None:
-    if message.media_group_id:
+    if message.media_group_id or not message.photo:
         raise RuleError("Отправь только одно фото, без альбома.")
     await state.update_data(photo_file_id=message.photo[-1].file_id)
     draft = await state.get_data()
@@ -166,6 +186,8 @@ async def save(callback: CallbackQuery, state: FSMContext, store: Store, user: U
 
 @router.callback_query(Registration.preview, F.data == "reg:restart")
 async def restart(callback: CallbackQuery, state: FSMContext) -> None:
+    if not isinstance(callback.message, Message):
+        return
     consent_at = (await state.get_data())["consent_at"]
     await state.set_data({"consent_at": consent_at})
     await request_name(callback.message, state)

@@ -18,14 +18,29 @@ REASONS = {
 }
 
 
+def get_callback_message(callback: CallbackQuery) -> Message:
+    message = callback.message
+    if not isinstance(message, Message):
+        raise RuleError("Сообщение недоступно.")
+    return message
+
+
+def get_callback_data(callback: CallbackQuery) -> str:
+    data = callback.data
+    if data is None:
+        raise RuleError("Некорректная команда.")
+    return data
+
+
 @router.callback_query(F.data.startswith("block:"))
 async def block(callback: CallbackQuery, store: Store, user: User) -> None:
-    target = target_id(callback.data.split(":", 1)[1])
+    message = get_callback_message(callback)
+    target = target_id(get_callback_data(callback).split(":", 1)[1])
     await store.block(user.id, target)
     await safe_call(
-        store, user.telegram_id, lambda: callback.message.edit_reply_markup(reply_markup=None)
+        store, user.telegram_id, lambda: message.edit_reply_markup(reply_markup=None)
     )
-    await callback.message.answer(
+    await message.answer(
         "<b>Пользователь заблокирован</b>\n"
         "Анкеты больше не будут видны друг другу в боте, а контакт станет недоступен.\n\n"
         "<i>В личном чате Telegram пользователя можно заблокировать отдельно.</i>",
@@ -37,12 +52,13 @@ async def block(callback: CallbackQuery, store: Store, user: User) -> None:
 async def report_begin(
     callback: CallbackQuery, state: FSMContext, store: Store, user: User
 ) -> None:
-    target = target_id(callback.data.split(":", 1)[1])
+    message = get_callback_message(callback)
+    target = target_id(get_callback_data(callback).split(":", 1)[1])
     await store.validate_target(user.id, target)
     await state.clear()
     await state.set_state(Complaint.reason)
     await state.update_data(target=target)
-    await callback.message.answer(
+    await message.answer(
         "<b>Почему ты хочешь пожаловаться?</b>\nВыбери причину ниже.\n\n<i>/cancel — отмена.</i>",
         reply_markup=inline(*[((label, f"reason:{key}"),) for key, label in REASONS.items()]),
     )
@@ -64,18 +80,19 @@ async def confirm_prompt(message: Message, state: FSMContext, reason: str) -> No
 
 @router.callback_query(Complaint.reason, F.data.startswith("reason:"))
 async def reason(callback: CallbackQuery, state: FSMContext) -> None:
-    key = callback.data.split(":", 1)[1]
+    message = get_callback_message(callback)
+    key = get_callback_data(callback).split(":", 1)[1]
     if key not in REASONS:
         raise RuleError("Выбери причину с помощью кнопки.")
     if key == "other":
         await state.set_state(Complaint.comment)
-        await callback.message.answer(
+        await message.answer(
             "<b>Опиши причину</b>\n"
             "Напиши комментарий длиной от 1 до 300 символов.\n\n"
             "<i>/cancel — отмена.</i>"
         )
     else:
-        await confirm_prompt(callback.message, state, REASONS[key])
+        await confirm_prompt(message, state, REASONS[key])
 
 
 @router.message(Complaint.comment)
@@ -90,12 +107,13 @@ async def comment(message: Message, state: FSMContext) -> None:
 async def report_confirm(
     callback: CallbackQuery, state: FSMContext, store: Store, user: User
 ) -> None:
+    message = get_callback_message(callback)
     draft = await state.get_data()
     await store.report(user.id, draft["target"], draft["reason"])
     await state.clear()
     await safe_call(
-        store, user.telegram_id, lambda: callback.message.edit_reply_markup(reply_markup=None)
+        store, user.telegram_id, lambda: message.edit_reply_markup(reply_markup=None)
     )
-    await callback.message.answer(
+    await message.answer(
         "<b>Жалоба сохранена</b>\nАнкета заблокирована для тебя.", reply_markup=home()
     )

@@ -14,6 +14,8 @@ router = Router(name="admin")
 
 @router.message(Command("admin"))
 async def admin(message: Message, store: Store) -> None:
+    if message.from_user is None:
+        raise RuleError("Не удалось определить отправителя команды.")
     users, profiles, matches, reports = await store.stats(message.from_user.id)
     await message.answer(
         f"<b>🛡 Панель администратора</b>\n"
@@ -26,8 +28,12 @@ async def admin(message: Message, store: Store) -> None:
 
 @router.message(Command("ban", "unban"))
 async def ban_command(message: Message, store: Store) -> None:
+    if message.from_user is None:
+        raise RuleError("Не удалось определить отправителя команды.")
     store.require_admin(message.from_user.id)
-    parts = (message.text or "").split()
+    if message.text is None:
+        raise RuleError("Укажи Telegram ID после команды: /ban 123456789")
+    parts = message.text.split()
     if len(parts) != 2:
         raise RuleError("Укажи Telegram ID после команды: /ban 123456789")
     banned = parts[0].split("@")[0] == "/ban"
@@ -42,6 +48,11 @@ async def ban_command(message: Message, store: Store) -> None:
 @router.callback_query(F.data.startswith("admin:"))
 async def admin_callback(callback: CallbackQuery, store: Store) -> None:
     store.require_admin(callback.from_user.id)
+    if callback.data is None:
+        raise RuleError("Недействительная кнопка администратора.")
+    if callback.message is None or not isinstance(callback.message, Message):
+        raise RuleError("Сообщение администратора недоступно.")
+    message = callback.message
     parts = callback.data.split(":")
     if len(parts) != 3:
         raise RuleError("Недействительная кнопка администратора.")
@@ -58,7 +69,7 @@ async def admin_callback(callback: CallbackQuery, store: Store) -> None:
         if navigation:
             rows.append(tuple(navigation))
         rows.append((("🏠 В меню", "home"),))
-        await callback.message.answer(
+        await message.answer(
             f"<b>⚠️ Открытые жалобы</b>\nСтраница {page + 1}"
             if reports
             else "<b>Открытых жалоб нет</b>",
@@ -76,18 +87,18 @@ async def admin_callback(callback: CallbackQuery, store: Store) -> None:
             (("Рассмотрено", f"admin:review:{report_id}"),),
             (("⚠️ Жалобы", "admin:list:0"),),
         )
-        await callback.message.answer(
+        await message.answer(
             f"<b>Жалоба #{report.id}</b>\nПричина: {escape(report.reason)}\n"
             f"Статус: {'открыта' if report.status == 'pending' else 'рассмотрена'}",
             reply_markup=keyboard,
         )
         if profile:
-            await callback.message.answer_photo(profile.photo_file_id, caption=caption(profile))
+            await message.answer_photo(profile.photo_file_id, caption=caption(profile))
         else:
-            await callback.message.answer("Текущая анкета удалена, но запись модерации сохранена.")
+            await message.answer("Текущая анкета удалена, но запись модерации сохранена.")
     elif action in {"ban", "unban", "review"}:
         await store.admin_action(callback.from_user.id, report_id, action)
-        await callback.message.answer(
+        await message.answer(
             "<b>Действие выполнено</b>\nСнятие блокировки не активирует анкету автоматически.",
             reply_markup=inline((("⚠️ Жалобы", "admin:list:0"),)),
         )

@@ -39,6 +39,8 @@ async def start(message: Message, state: FSMContext, store: Store, user: User) -
 
 @router.callback_query(F.data == "home")
 async def home(callback: CallbackQuery, state: FSMContext, store: Store, user: User) -> None:
+    if callback.message is None or not isinstance(callback.message, Message):
+        return
     await show_home(callback.message, state, store, user)
 
 
@@ -47,6 +49,8 @@ async def home(callback: CallbackQuery, state: FSMContext, store: Store, user: U
 async def cancel(event: Message | CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     message = event.message if isinstance(event, CallbackQuery) else event
+    if message is None or not isinstance(message, Message):
+        return
     await message.answer(
         "Действие отменено. Сохранённая анкета не изменилась.", reply_markup=menu()
     )
@@ -65,6 +69,8 @@ async def privacy(message: Message) -> None:
 
 @router.message(Command("id"))
 async def own_id(message: Message) -> None:
+    if message.from_user is None:
+        return
     await message.answer(f"Твой Telegram ID: <code>{message.from_user.id}</code>")
 
 
@@ -74,6 +80,8 @@ async def delete_prompt(event: Message | CallbackQuery, state: FSMContext) -> No
     await state.clear()
     await state.update_data(delete_requested=True)
     message = event.message if isinstance(event, CallbackQuery) else event
+    if message is None or not isinstance(message, Message):
+        return
     await message.answer(
         texts.DELETE_NOTICE,
         reply_markup=inline(
@@ -87,7 +95,11 @@ async def delete_confirm(
     callback: CallbackQuery, state: FSMContext, store: Store, user: User
 ) -> None:
     if not (await state.get_data()).get("delete_requested"):
+        if callback.message is None or not isinstance(callback.message, Message):
+            return
         await callback.message.answer("Подтверждение устарело. Начни заново с /delete.")
+        return
+    if callback.message is None or not isinstance(callback.message, Message):
         return
     await store.delete_profile(user.id)
     await state.clear()

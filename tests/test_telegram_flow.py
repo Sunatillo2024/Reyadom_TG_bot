@@ -1,16 +1,33 @@
 from datetime import UTC, datetime
 from itertools import count
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import AsyncMock
 
+import pytest
 from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.methods import AnswerCallbackQuery, GetChat, SendMessage, SendPhoto
-from aiogram.types import Chat, ChatFullInfo, Location, Message, PhotoSize, Update, User
+from aiogram.types import (
+    AcceptedGiftTypes,
+    CallbackQuery,
+    Chat,
+    ChatFullInfo,
+    InlineKeyboardMarkup,
+    Location,
+    Message,
+    PhotoSize,
+    Update,
+    User,
+)
 from sqlalchemy import select
 
 from bot.db.models import Match, Report
+from bot.handlers.discovery import MESSAGE_ID_KEY, PHOTO_ID_KEY, _show_profile, show_next
+from bot.keyboards.common import decisions
 from bot.main import create_dispatcher
+from bot.services.telegram import caption
 from bot.texts import LEGACY_MENU_LABELS, MENU_LABELS, PREVIOUS_MENU_LABELS
 
 
@@ -22,15 +39,18 @@ async def test_full_dispatcher_flow_offline(store, make_user, monkeypatch):
     sequence = count(1)
 
     async def request(_bot, method, **_kwargs):
+        del _bot, _kwargs
         calls.append(method)
         if isinstance(method, (SendMessage, SendPhoto)):
             return Message(
-                message_id=next(sequence),
-                date=datetime.now(UTC),
-                chat=Chat(id=int(method.chat_id), type="private"),
+                message_id=cast(int, next(sequence)),
+                date=cast(datetime, datetime.now(UTC)),
+                chat=cast(Chat, Chat(id=int(method.chat_id), type="private")),
                 text=getattr(method, "text", None),
                 reply_markup=(
-                    method.reply_markup if hasattr(method.reply_markup, "inline_keyboard") else None
+                    cast(InlineKeyboardMarkup, method.reply_markup)
+                    if hasattr(method.reply_markup, "inline_keyboard")
+                    else None
                 ),
             )
         if isinstance(method, GetChat):
@@ -41,12 +61,12 @@ async def test_full_dispatcher_flow_offline(store, make_user, monkeypatch):
                 username="current_name",
                 accent_color_id=1,
                 max_reaction_count=11,
-                accepted_gift_types={
-                    "unlimited_gifts": False,
-                    "limited_gifts": False,
-                    "unique_gifts": False,
-                    "premium_subscription": False,
-                },
+                accepted_gift_types=AcceptedGiftTypes(
+                    unlimited_gifts=False,
+                    limited_gifts=False,
+                    unique_gifts=False,
+                    premium_subscription=False,
+                ),
             )
         return True
 
@@ -78,16 +98,19 @@ async def test_full_dispatcher_flow_offline(store, make_user, monkeypatch):
         if callback:
             update = Update(
                 update_id=next(sequence),
-                callback_query={
-                    "id": str(next(sequence)),
-                    "from_user": sender,
-                    "chat_instance": "test",
-                    "message": Message(**payload),
-                    "data": callback,
-                },
+                callback_query=CallbackQuery(
+                    id=str(next(sequence)),
+                    from_user=sender,
+                    chat_instance="test",
+                    message=Message(**cast(dict[str, Any], payload)),
+                    data=callback,
+                ),
             )
         else:
-            update = Update(update_id=next(sequence), message=Message(**payload))
+            update = Update(
+                update_id=next(sequence),
+                message=Message(**cast(dict[str, Any], payload)),
+            )
         await dispatcher.feed_update(bot, update)
 
     def last_text():
@@ -240,3 +263,104 @@ async def test_failing_photo_hides_user_and_keeps_saved_profile(store, make_user
     await AccessMiddleware(store)(handler, message, {"bot": bot})
     assert not (await store.profile(user.id)).is_active
     bot.send_message.assert_not_called()
+
+
+async def test_ten_discovery_profiles_reuse_one_message(store, make_user):
+    actor = await make_user(name="Viewer")
+    candidates = []
+    for index in range(10):
+        photo = "shared-photo" if index < 2 else f"photo-{index}"
+        candidate = await make_user(name=f"Person {index}", photo_file_id=photo)
+        candidates.append(candidate)
+
+    profile_message_id = 9_001
+    state_data = {}
+    state = SimpleNamespace(
+        get_data=AsyncMock(side_effect=lambda: state_data.copy()),
+        update_data=AsyncMock(side_effect=lambda **values: state_data.update(values)),
+    )
+    bot = SimpleNamespace(
+        edit_message_caption=AsyncMock(),
+        edit_message_media=AsyncMock(),
+    )
+    message = SimpleNamespace(
+        bot=bot,
+        chat=SimpleNamespace(id=actor.telegram_id),
+        answer=AsyncMock(),
+        answer_photo=AsyncMock(return_value=SimpleNamespace(message_id=profile_message_id)),
+    )
+
+    await show_next(message, state, store, actor)
+    for candidate in candidates[:9]:
+        result = await store.decide(actor.id, candidate.id, "pass")
+        assert result.created
+        await show_next(message, state, store, actor)
+
+    message.answer_photo.assert_awaited_once()
+    assert bot.edit_message_caption.await_count == 1
+    assert bot.edit_message_media.await_count == 8
+    assert state_data[MESSAGE_ID_KEY] == profile_message_id
+    assert state_data[PHOTO_ID_KEY] == "photo-9"
+
+    first_edit = bot.edit_message_caption.await_args
+    second_profile = await store.profile(candidates[1].id)
+    assert first_edit.kwargs == {
+        "chat_id": actor.telegram_id,
+        "message_id": profile_message_id,
+        "caption": caption(second_profile),
+        "reply_markup": decisions(candidates[1].id),
+    }
+
+    for edit, expected_user in zip(
+        bot.edit_message_media.await_args_list, candidates[2:], strict=True
+    ):
+        profile = await store.profile(expected_user.id)
+        assert edit.kwargs["chat_id"] == actor.telegram_id
+        assert edit.kwargs["message_id"] == profile_message_id
+        assert edit.kwargs["media"].media == profile.photo_file_id
+        assert edit.kwargs["media"].caption == caption(profile)
+        assert edit.kwargs["reply_markup"] == decisions(expected_user.id)
+
+
+async def test_discovery_edit_failure_handling(store, make_user):
+    from aiogram.methods import EditMessageMedia
+
+    candidate = await make_user(name="Candidate", photo_file_id="new-photo")
+    profile = await store.profile(candidate.id)
+    method = EditMessageMedia(
+        chat_id=candidate.telegram_id,
+        message_id=77,
+        media={"type": "photo", "media": "new-photo"},
+    )
+    state = AsyncMock()
+    state.get_data.return_value = {MESSAGE_ID_KEY: 77, PHOTO_ID_KEY: "old-photo"}
+    bot = SimpleNamespace(edit_message_media=AsyncMock())
+    message = SimpleNamespace(
+        bot=bot,
+        chat=SimpleNamespace(id=candidate.telegram_id),
+        answer_photo=AsyncMock(return_value=SimpleNamespace(message_id=88)),
+    )
+
+    bot.edit_message_media.side_effect = TelegramBadRequest(
+        method=method, message="Bad Request: message is not modified"
+    )
+    await _show_profile(message, state, profile, False)
+    message.answer_photo.assert_not_awaited()
+
+    bot.edit_message_media.side_effect = TelegramBadRequest(
+        method=method, message="Bad Request: message to edit not found"
+    )
+    await _show_profile(message, state, profile, False)
+    message.answer_photo.assert_awaited_once()
+    assert state.update_data.await_args.kwargs == {
+        MESSAGE_ID_KEY: 88,
+        PHOTO_ID_KEY: "new-photo",
+    }
+
+    message.answer_photo.reset_mock()
+    bot.edit_message_media.side_effect = TelegramBadRequest(
+        method=method, message="Bad Request: wrong file identifier"
+    )
+    with pytest.raises(TelegramBadRequest, match="wrong file identifier"):
+        await _show_profile(message, state, profile, False)
+    message.answer_photo.assert_not_awaited()

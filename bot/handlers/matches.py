@@ -41,6 +41,8 @@ async def match_menu(message: Message, state: FSMContext, store: Store, user: Us
 
 @router.callback_query(F.data.startswith("matches:"))
 async def match_page(callback: CallbackQuery, store: Store, user: User) -> None:
+    if callback.data is None or not isinstance(callback.message, Message):
+        return
     value = callback.data.split(":", 1)[1]
     page = 0 if value == "0" else target_id(value)
     await show_matches(callback.message, store, user, page)
@@ -48,6 +50,8 @@ async def match_page(callback: CallbackQuery, store: Store, user: User) -> None:
 
 @router.callback_query(F.data.startswith("match:"))
 async def match_open(callback: CallbackQuery, store: Store, user: User) -> None:
+    if callback.data is None or not isinstance(callback.message, Message):
+        return
     match_id = target_id(callback.data.split(":", 1)[1])
     target = await store.match_target(user.id, match_id)
     profile = await store.profile(target.id)
@@ -62,6 +66,8 @@ async def match_open(callback: CallbackQuery, store: Store, user: User) -> None:
 
 @router.callback_query(F.data.startswith("contact:"))
 async def contact(callback: CallbackQuery, store: Store, user: User) -> None:
+    if callback.data is None or not isinstance(callback.message, Message) or callback.bot is None:
+        return
     match_id = target_id(callback.data.split(":", 1)[1])
     url = await contact_url(callback.bot, store, user.id, match_id)
     if url:

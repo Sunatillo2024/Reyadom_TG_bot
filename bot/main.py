@@ -37,7 +37,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 def migration_head() -> str:
     config = Config(str(PROJECT_ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(PROJECT_ROOT / "alembic"))
-    return ScriptDirectory.from_config(config).get_current_head()
+    head = ScriptDirectory.from_config(config).get_current_head()
+    if head is None:
+        raise RuntimeError("Alembic не содержит миграций")
+    return head
 
 
 class PollingDispatcher(Dispatcher):
@@ -92,9 +95,11 @@ def create_dispatcher(store: Store) -> Dispatcher:
 
     @fallback.callback_query()
     async def stale(callback: CallbackQuery) -> None:
-        await callback.message.answer(
-            "Кнопка устарела или недействительна. Продолжи с помощью /start."
-        )
+        text = "Кнопка устарела или недействительна. Продолжи с помощью /start."
+        if isinstance(callback.message, Message):
+            await callback.message.answer(text)
+        else:
+            await callback.answer(text, show_alert=True)
 
     @fallback.message()
     async def unknown(message: Message) -> None:
