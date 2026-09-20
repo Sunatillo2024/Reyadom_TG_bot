@@ -8,9 +8,17 @@ from bot.db.models import Base
 target_metadata = Base.metadata
 
 
+def database_url() -> str:
+    """Prefer an explicit Alembic URL, otherwise load DATABASE_URL from the environment."""
+    configured_url = (context.config.get_main_option("sqlalchemy.url") or "").strip()
+    if configured_url:
+        return Settings(database_url=configured_url).database_url
+    return Settings().database_url  # type: ignore[call-arg]
+
+
 def offline() -> None:
     context.configure(
-        url=Settings().database_url,
+        url=database_url(),
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
@@ -24,14 +32,13 @@ def migrate(connection) -> None:
         connection=connection,
         target_metadata=target_metadata,
         compare_type=True,
-        render_as_batch=True,
     )
     with context.begin_transaction():
         context.run_migrations()
 
 
 async def online() -> None:
-    db = Database(Settings().database_url)
+    db = Database(database_url())
     try:
         async with db.engine.connect() as connection:
             await connection.run_sync(migrate)

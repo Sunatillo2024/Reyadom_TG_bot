@@ -176,7 +176,7 @@ async def run(settings: Settings) -> int:
 
 def main() -> None:
     try:
-        settings = Settings()
+        settings = Settings()  # type: ignore[call-arg]
     except ValidationError as exc:
         fields = ", ".join(".".join(map(str, error["loc"])) for error in exc.errors())
         print(f"Неверные настройки .env: {fields}. Проверьте .env.example.", file=sys.stderr)
@@ -185,7 +185,7 @@ def main() -> None:
         level=settings.log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
     # HTTP/library debug logs can include request contents. Keep them quiet even in DEBUG.
-    for name in ("aiohttp", "aiogram", "sqlalchemy", "aiosqlite"):
+    for name in ("aiohttp", "aiogram", "sqlalchemy", "asyncpg"):
         logging.getLogger(name).setLevel(logging.WARNING)
     try:
         code = asyncio.run(run(settings))

@@ -2,7 +2,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import and_, case, delete, exists, func, or_, select
+from sqlalchemy import and_, case, delete, exists, func, or_, select, text
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -35,14 +36,16 @@ class Store:
         self.admin_ids = frozenset(admin_ids)
 
     async def sync_user(self, telegram_id: int, username: str | None) -> User:
-        async with self.db.write_lock, self.db.sessions.begin() as session:
-            user = await session.scalar(select(User).where(User.telegram_id == telegram_id))
-            if user is None:
-                user = User(telegram_id=telegram_id, username=username)
-                session.add(user)
-                await session.flush()
-            else:
-                user.username = username
+        async with self.db.sessions.begin() as session:
+            user_id = await session.scalar(
+                insert(User)
+                .values(telegram_id=telegram_id, username=username)
+                .on_conflict_do_update(
+                    index_elements=[User.telegram_id], set_={"username": username}
+                )
+                .returning(User.id)
+            )
+            user = await session.get(User, user_id)
             if not username:
                 profile = await session.get(Profile, user.id)
                 if profile:
@@ -50,7 +53,7 @@ class Store:
             return user
 
     async def hide_telegram(self, telegram_id: int) -> None:
-        async with self.db.write_lock, self.db.sessions.begin() as session:
+        async with self.db.sessions.begin() as session:
             user = await session.scalar(select(User).where(User.telegram_id == telegram_id))
             if user and (profile := await session.get(Profile, user.id)):
                 profile.is_active = False
@@ -96,7 +99,7 @@ class Store:
         if not values["photo_file_id"] or not isinstance(draft.get("consent_at"), datetime):
             raise RuleError("Нужны фото и твоё согласие. Начни заново с /start.")
         values["city_normalized"] = normalize_city(values["city"])
-        async with self.db.write_lock, self.db.sessions.begin() as session:
+        async with self.db.sessions.begin() as session:
             user = await self._actor(session, actor)
             if not user.username:
                 raise RuleError("Добавь имя пользователя в настройках Telegram.")
@@ -118,7 +121,7 @@ class Store:
             pass
         else:
             raise RuleError("Недопустимое поле или значение.")
-        async with self.db.write_lock, self.db.sessions.begin() as session:
+        async with self.db.sessions.begin() as session:
             await self._actor(session, actor)
             profile = await session.get(Profile, actor)
             if not profile:
@@ -129,7 +132,7 @@ class Store:
 
     async def edit_location(self, actor: int, latitude: float, longitude: float) -> None:
         latitude, longitude = coordinates(latitude, longitude)
-        async with self.db.write_lock, self.db.sessions.begin() as session:
+        async with self.db.sessions.begin() as session:
             await self._actor(session, actor)
             profile = await session.get(Profile, actor)
             if not profile:
@@ -139,7 +142,7 @@ class Store:
 
     async def settings(self, actor: int, minimum: int, maximum: int, own_city: bool) -> None:
         minimum, maximum = age_range(minimum, maximum)
-        async with self.db.write_lock, self.db.sessions.begin() as session:
+        async with self.db.sessions.begin() as session:
             await self._actor(session, actor)
             profile = await session.get(Profile, actor)
             if not profile:
@@ -148,7 +151,7 @@ class Store:
             profile.own_city_only = own_city
 
     async def set_active(self, actor: int, active: bool) -> None:
-        async with self.db.write_lock, self.db.sessions.begin() as session:
+        async with self.db.sessions.begin() as session:
             user = await self._actor(session, actor)
             profile = await session.get(Profile, actor)
             if not profile or (active and not user.username):
@@ -157,7 +160,7 @@ class Store:
 
     async def delete_profile(self, actor: int) -> None:
         # Deliberately available to banned users. Moderation records survive.
-        async with self.db.write_lock, self.db.sessions.begin() as session:
+        async with self.db.sessions.begin() as session:
             await session.execute(
                 delete(Reaction).where(
                     or_(Reaction.from_user_id == actor, Reaction.to_user_id == actor)
@@ -180,10 +183,21 @@ class Store:
             Profile.latitude.is_not(None),
             Profile.longitude.is_not(None),
         )
+        own_latitude = func.radians(own.latitude)
+        own_longitude = func.radians(own.longitude)
+        candidate_latitude = func.radians(Profile.latitude)
+        candidate_longitude = func.radians(Profile.longitude)
+        haversine = func.power(func.sin((candidate_latitude - own_latitude) / 2), 2) + (
+            func.cos(own_latitude)
+            * func.cos(candidate_latitude)
+            * func.power(func.sin((candidate_longitude - own_longitude) / 2), 2)
+        )
         distance = case(
             (
                 has_locations,
-                func.distance_km(own.latitude, own.longitude, Profile.latitude, Profile.longitude),
+                6_371.0088
+                * 2
+                * func.asin(func.least(1.0, func.sqrt(haversine))),
             ),
             else_=None,
         ).label("distance_km")
@@ -258,22 +272,32 @@ class Store:
     async def decide(self, actor: int, target: int, kind: str) -> Decision:
         if kind not in {"like", "pass"} or actor == target:
             raise RuleError("Недопустимая реакция.")
-        async with self.db.write_lock, self.db.sessions.begin() as session:
+        async with self.db.sessions.begin() as session:
+            low, high = sorted((actor, target))
+            await session.execute(select(func.pg_advisory_xact_lock(low, high)))
             await self._actor(session, actor, active=True)
             previous = await session.scalar(
-                select(Reaction).where(
+                select(Reaction.id).where(
                     Reaction.from_user_id == actor, Reaction.to_user_id == target
                 )
             )
-            if previous:
+            if previous is not None:
                 return Decision(False)
             eligible = await session.scalar(
                 self._candidates(actor).where(Profile.user_id == target)
             )
             if not eligible:
                 raise RuleError("Эта анкета сейчас недоступна или не соответствует твоим фильтрам.")
-            session.add(Reaction(from_user_id=actor, to_user_id=target, kind=kind))
-            await session.flush()
+            reaction_id = await session.scalar(
+                insert(Reaction)
+                .values(from_user_id=actor, to_user_id=target, kind=kind)
+                .on_conflict_do_nothing(
+                    index_elements=[Reaction.from_user_id, Reaction.to_user_id]
+                )
+                .returning(Reaction.id)
+            )
+            if reaction_id is None:
+                return Decision(False)
             other = await session.get(User, target)
             reverse = await session.scalar(
                 select(Reaction).where(
@@ -284,11 +308,14 @@ class Store:
             )
             match_id = None
             if kind == "like" and reverse:
-                low, high = sorted((actor, target))
-                match = Match(user_low_id=low, user_high_id=high)
-                session.add(match)
-                await session.flush()
-                match_id = match.id
+                match_id = await session.scalar(
+                    insert(Match)
+                    .values(user_low_id=low, user_high_id=high)
+                    .on_conflict_do_nothing(
+                        index_elements=[Match.user_low_id, Match.user_high_id]
+                    )
+                    .returning(Match.id)
+                )
             return Decision(True, match_id, other.telegram_id)
 
     async def _match_target(self, session: AsyncSession, actor: int, match_id: int) -> User:
@@ -372,31 +399,32 @@ class Store:
             await self._moderation_target(session, actor, target)
 
     async def _block(self, session: AsyncSession, actor: int, target: int) -> None:
-        existing = await session.scalar(
-            select(Block.id).where(Block.blocker_id == actor, Block.blocked_id == target)
+        await session.execute(
+            insert(Block)
+            .values(blocker_id=actor, blocked_id=target)
+            .on_conflict_do_nothing(index_elements=[Block.blocker_id, Block.blocked_id])
         )
-        if not existing:
-            session.add(Block(blocker_id=actor, blocked_id=target))
 
     async def block(self, actor: int, target: int) -> None:
-        async with self.db.write_lock, self.db.sessions.begin() as session:
+        async with self.db.sessions.begin() as session:
             await self._moderation_target(session, actor, target)
             await self._block(session, actor, target)
 
     async def report(self, actor: int, target: int, reason: str) -> None:
         if not 1 <= len(reason) <= 320:
             raise RuleError("Комментарий к жалобе слишком длинный или пустой.")
-        async with self.db.write_lock, self.db.sessions.begin() as session:
+        async with self.db.sessions.begin() as session:
+            low, high = sorted((actor, target))
+            await session.execute(select(func.pg_advisory_xact_lock(low, high)))
             await self._moderation_target(session, actor, target)
-            pending = await session.scalar(
-                select(Report.id).where(
-                    Report.reporter_id == actor,
-                    Report.reported_user_id == target,
-                    Report.status == "pending",
+            await session.execute(
+                insert(Report)
+                .values(reporter_id=actor, reported_user_id=target, reason=reason)
+                .on_conflict_do_nothing(
+                    index_elements=[Report.reporter_id, Report.reported_user_id],
+                    index_where=text("status = 'pending'"),
                 )
             )
-            if not pending:
-                session.add(Report(reporter_id=actor, reported_user_id=target, reason=reason))
             await self._block(session, actor, target)
 
     def require_admin(self, telegram_id: int) -> None:
@@ -446,7 +474,7 @@ class Store:
 
     async def admin_action(self, telegram_id: int, report_id: int, action: str) -> None:
         self.require_admin(telegram_id)
-        async with self.db.write_lock, self.db.sessions.begin() as session:
+        async with self.db.sessions.begin() as session:
             report = await session.get(Report, report_id)
             if not report or action not in {"ban", "unban", "review"}:
                 raise RuleError("Недопустимое действие или жалоба.")
@@ -465,7 +493,7 @@ class Store:
         self, telegram_id: int, target_telegram_id: int, banned: bool
     ) -> None:
         self.require_admin(telegram_id)
-        async with self.db.write_lock, self.db.sessions.begin() as session:
+        async with self.db.sessions.begin() as session:
             user = await session.scalar(select(User).where(User.telegram_id == target_telegram_id))
             if not user:
                 raise RuleError("Пользователь не найден.")

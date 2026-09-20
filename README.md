@@ -2,7 +2,7 @@
 
 18+ kichik auditoriya uchun mustaqil MVP: anketa → like/pass → o'zaro match → Telegram shaxsiy chatidagi suhbat. Bot matnlari o'zbekcha, lotin yozuvida. Boshqa botdan foydalanuvchi, anketa yoki rasmlar ko'chirilmaydi.
 
-Python 3.11 (tekshirilgan versiya: 3.11.9), aiogram 3, SQLAlchemy asyncio, SQLite/aiosqlite, Alembic va pydantic-settings ishlatiladi. Bitta process, long polling; domen, webhook, alohida DB server yoki Docker talab qilinmaydi. FastAPI, frontend, Redis, to'lov yoki bot ichidagi anonim chat yo'q. Hozir faqat SQLite qo'llanadi; PostgreSQL mosligi va'da qilinmaydi.
+Python 3.11 (tekshirilgan versiya: 3.11.9), aiogram 3, SQLAlchemy asyncio, PostgreSQL/asyncpg, Alembic va pydantic-settings ishlatiladi. Bot bitta processda long polling orqali ishlaydi. FastAPI, frontend, Redis, to'lov yoki bot ichidagi anonim chat yo'q.
 
 ## Lokal ishga tushirish
 
@@ -28,21 +28,29 @@ cp -n .env.example .env
 ```dotenv
 BOT_TOKEN=
 ADMIN_IDS=[]
-DATABASE_URL=sqlite+aiosqlite:///./data/bot.db
+DATABASE_URL=postgresql+asyncpg://postgres:1212@localhost:5432/ryadom_bot
 LOG_LEVEL=INFO
 ```
+
+PostgreSQL lokal o'rnatilgan bo'lsa, `ryadom_bot` bazasini yarating. Docker bilan tez variant:
+
+```sh
+docker compose up -d postgres
+docker compose ps
+```
+
+Docker Compose varianti hostda `55432` portini ishlatadi, shuning uchun uning lokal URL'i `postgresql+asyncpg://postgres:1212@localhost:55432/ryadom_bot`. PostgreSQL'ni to'g'ridan-to'g'ri o'rnatsangiz `.env.example` dagi standart `5432` portini qoldirishingiz mumkin. `DATABASE_URL` majburiy; loyiha faqat PostgreSQL'ni qabul qiladi. Railway beradigan `postgresql://...` (yoki `postgres://...`) URL dastur tomonidan avtomatik `postgresql+asyncpg://...` formatiga o'tkaziladi.
 
 Telegramdagi rasmiy **@BotFather** bilan `/newbot` orqali bot yarating, olgan tokeningizni `BOT_TOKEN` ga yozing. Tokenni kodga, README'ga, gitga yoki chatlarga joylamang. Token oshkor bo'lsa, BotFather orqali almashtiring. BotFather'da guruhlarga qo'shishni o'chirishingiz mumkin; dastur baribir faqat private chatda ishlaydi.
 
 Avval `ADMIN_IDS=[]` bilan ishga tushirib, botga `/id` yuboring. Natijani `ADMIN_IDS=[SIZNING_RAQAMLI_ID]` shaklida kiriting va botni qayta ishga tushiring. Bu yerda `SIZNING_RAQAMLI_ID` matnini haqiqiy songa almashtirish kerak. `.env.example` dagi `123456789` faqat namuna. Bir nechta admin JSON ro'yxat bilan yoziladi: `[111111111,222222222]`. Username admin huquqini bermaydi.
 
 ```sh
-mkdir -p data
 alembic upgrade head
 python -m bot.main
 ```
 
-To'xtatish: `Ctrl+C`. Bo'sh yoki noto'g'ri token bot startup'ida tushunarli xabar beradi. Import, migratsiya va offline testlar token talab qilmaydi. Baza startup'da avtomatik yaratilmaydi: sxemani Alembic orqali tayyorlang. `data/bot.db` nisbiy yo'li uchun doim loyiha ildizidan ishga tushiring.
+To'xtatish: `Ctrl+C`. Bo'sh yoki noto'g'ri token bot startup'ida tushunarli xabar beradi. Migratsiya va testlar Telegram tokenini talab qilmaydi. Baza startup'da avtomatik yaratilmaydi: sxemani Alembic orqali tayyorlang.
 
 **Bir token bilan faqat bitta polling processi ishlasin.** Lokal terminal, PyCharm va VPS'da bir xil tokenni bir paytda ishga tushirmang. Conflict bo'lsa, ortiqcha processni to'xtating; boshqa ishlayotgan servis avtomatik to'xtatilmaydi. Bu talab [aiogram long polling hujjatida](https://docs.aiogram.dev/en/latest/dispatcher/long_polling.html) ham qayd etilgan.
 
@@ -95,9 +103,9 @@ Bu qoldiriladigan ma'lumotlar o'chirishdan oldin botda tushuntiriladi. Eski Tele
 
 ## Saqlash va ishlash cheklovlari
 
-Tayyor anketalar, reaction, match, block va reportlar SQLite bazasida. Har service amali alohida `AsyncSession` ochadi; umumiy global session yo'q. Foreign key yoqilgan, WAL ishlatiladi, busy timeout 10 soniya. Vaqtlar UTC (SQLite'da timezone'siz UTC qiymat) saqlanadi. Telegram ID `BigInteger`; juftliklarga unique va self-action cheklovlari, profil yoshiga DB cheklovlari bor.
+Tayyor anketalar, reaction, match, block va reportlar PostgreSQL bazasida. Har service amali alohida `AsyncSession` ochadi; umumiy global session yo'q. Engine kichik servis uchun `pool_size=5`, `max_overflow=5` va `pool_pre_ping` bilan sozlangan. Vaqtlar timezone-aware UTC sifatida saqlanadi. Telegram ID `BigInteger`; juftliklarga unique va self-action cheklovlari, profil yoshiga DB cheklovlari bor.
 
-Yozishlar process ichidagi bitta `asyncio.Lock` bilan ketma-ket bajariladi. Like, qarshi like tekshiruvi va match bitta tranzaksiyada. Telegram xabarlari commitdan keyin, DB session yoki yozish lock'i ushlab turilmagan holatda yuboriladi. Shu sababli bu sxema **bitta bot processi** uchun; ko'p worker yoki ko'p instance ishlatmang.
+Like va match yaratish bitta PostgreSQL tranzaksiyasida bajariladi. Juftlik bo'yicha transaction-level advisory lock hamda `UNIQUE`/`ON CONFLICT` bir vaqtdagi takroriy reaction yoki matchni oldini oladi. Block va ochiq reportlar ham DB unique constraintlari orqali deduplikatsiya qilinadi. Telegram xabarlari commitdan keyin, DB session ushlab turilmagan holatda yuboriladi. Long polling sababli **bitta bot processi** ishlating; bir token uchun ko'p replica yoqmang.
 
 Kichik auditoriya uchun polling update'lari ketma-ket qayta ishlanadi; Telegramning sekin javobi navbatdagi update'ni kechiktirishi mumkin. FSM'da foydalanuvchi amallari izolyatsiyasi ham bor. Oddiy yuborishlar avtomatik takrorlanmaydi. Polling tarmoq xatosida ko'pi bilan besh ketma-ket urinish qiladi; keyin process xato bilan tugaydi. `RetryAfter` bir daqiqadan katta bo'lsa ham process tugaydi. systemd cheklangan qayta ishga tushirishni boshqaradi.
 
@@ -105,18 +113,19 @@ Bildirishnoma «aynan bir marta yetishi» kafolatlanmaydi: commit va yuborish or
 
 **MemoryStorage faqat tugallanmagan forma uchun. Restartda forma, tasdiq bosqichi va cooldown yo'qoladi.** Saqlangan anketa buzilmaydi; `/start` qayta ro'yxatdan o'tishga majburlamaydi. Bu [aiogram MemoryStorage xususiyati](https://docs.aiogram.dev/en/v3.22.0/dispatcher/finite_state_machine/storages.html) va ushbu MVP'ning ongli soddalashtirishidir.
 
-Token va profil matnlari logga yozilmaydi; kutilmagan xatolarda exception turi va kod joylari yoziladi. `.env`, `.venv*`, DB, WAL/SHM va backuplar `.gitignore` orqali chiqarilgan. Loyiha ish papkasida dastlab git repozitoriy bo'lmagan; git tarixi yaratilmagan.
+Token va profil matnlari logga yozilmaydi; kutilmagan xatolarda exception turi va kod joylari yoziladi. `.env`, `.venv*`, eski SQLite DB/WAL/SHM fayllari va backuplar `.gitignore` orqali chiqarilgan.
 
 ## Tekshiruvlar
 
 ```sh
 python -m pip install -r requirements-dev.txt
-pytest
+docker compose exec -T postgres createdb -U postgres ryadom_bot_test
+TEST_DATABASE_URL=postgresql+asyncpg://postgres:1212@localhost:55432/ryadom_bot_test pytest
 ruff check .
-alembic check
+DATABASE_URL=postgresql+asyncpg://postgres:1212@localhost:55432/ryadom_bot alembic check
 ```
 
-Ruff faqat dev dependency. Versiyalar requirements fayllarida aniq qayd etilgan. Testlar vaqtinchalik alohida SQLite fayllaridan foydalanadi; haqiqiy Telegram API chaqiruvlari mock qilinadi, `data/bot.db` test ma'lumotlari bilan to'ldirilmaydi.
+Ruff faqat dev dependency. Versiyalar requirements fayllarida aniq qayd etilgan. Integratsion testlar xavfsizlik uchun nomi `_test` bilan tugaydigan alohida PostgreSQL bazasini va `TEST_DATABASE_URL`ni talab qiladi; sxema testlar davomida tozalanadi. Haqiqiy Telegram API chaqiruvlari mock qilinadi.
 
 Testlar: yosh va kontakt validatsiyasi, tasdiqlanmagan profil, ikki tomon filtrlari, yashirish/ban/block/pass, takroriy va bir vaqtdagi likelar, kontakt ruxsati va joriy username, API kutishidagi ban/block/delete, notification xatolari, o'chirish va moderatsiya yozuvlari, restartdan keyingi saqlanish, toza migratsiya, bo'sh token hamda haqiqiy aiogram router/FSM orqali ro'yxatdan o'tishdan kontaktgacha bo'lgan offline oqim.
 
@@ -129,7 +138,27 @@ Haqiqiy token bilan qo'lda 2–3 test akkauntida tekshiring:
 5. C akkaunti bilan begona matchga kontakt ochilmasligini tekshiring. Yashirish, block, report, admin ban va `/delete`ni sinang; bloklangan/banlangan/o'chirilgan profildan kontakt berilmasin.
 6. Botni to'xtatib qayta ishga tushiring. Tayyor anketalar va matchlar qolsin; tugallanmagan forma yangidan boshlansin. Botni Telegramda bloklab, keyin qaytib kelganda profilni qo'lda faollashtiring.
 
-Haqiqiy Telegram tarmog'i, haqiqiy `file_id`, BotFather sozlamalari va VPS systemd bu loyiha tayyorlashdagi offline testlar bilan tekshirilmagan.
+Haqiqiy Telegram tarmog'i, haqiqiy `file_id` va BotFather sozlamalari avtomatik testlarda tekshirilmaydi.
+
+## Railway
+
+Railway project ichida ikkita alohida service yarating: bot repository service va PostgreSQL service. Bot service Variables bo'limida quyidagilar bo'lsin:
+
+```dotenv
+BOT_TOKEN=<BotFather tokeni>
+ADMIN_IDS=[123456789]
+DATABASE_URL=${{Postgres.DATABASE_URL}}
+LOG_LEVEL=INFO
+```
+
+`Postgres` — PostgreSQL service nomi; boshqa nom tanlangan bo'lsa reference nomini ham moslang. Railway'ning oddiy `postgresql://...` qiymati avtomatik asyncpg URL'ga aylantiriladi. Maxfiy qiymatlarni repository yoki Docker image ichiga yozmang.
+
+- Pre-deploy Command: `alembic upgrade head`
+- Start Command: `python -m bot.main`
+
+Bot service replica sonini **1** qilib qoldiring. Bir xil token bilan bir vaqtda lokal botni va Railway botini ham ishga tushirmang: Telegram long polling ikkinchi processga conflict qaytaradi. Deploy logida avval migratsiya muvaffaqiyatli tugaganini, keyin polling boshlanganini tekshiring.
+
+Bu o'tishda SQLite'dan data migration ataylab qilinmadi: loyiha bazasida ko'chiriladigan real foydalanuvchi, anketa, like yoki match yo'q. Eski `data/bot.db` o'chirilmaydi va lokal backup sifatida qoladi; dastur undan boshqa foydalanmaydi.
 
 ## Linux VPS va systemd
 
@@ -150,8 +179,6 @@ sudo -u tanishuv /opt/tanishuv/.venv/bin/python -m pip install -r requirements.t
 sudo -u tanishuv cp -n .env.example .env
 sudo -u tanishuv nano .env
 sudo chmod 600 .env
-sudo -u tanishuv mkdir -p data
-sudo chmod 700 data
 sudo -u tanishuv /opt/tanishuv/.venv/bin/alembic upgrade head
 sudo install -m 644 deploy/tanishuv-bot.service /etc/systemd/system/tanishuv-bot.service
 sudo systemctl daemon-reload
@@ -159,7 +186,7 @@ sudo systemctl enable --now tanishuv-bot
 sudo systemctl status tanishuv-bot
 ```
 
-`deploy/tanishuv-bot.service` ichidagi user, group, working directory va Python yo'lini haqiqiy joylashuvingizga moslang. `.env` pydantic-settings orqali working directory'dan o'qiladi. Service faqat `data/` ichiga yoza oladi; boshqa DATABASE_URL tanlasangiz `ReadWritePaths`ni ham moslang.
+`deploy/tanishuv-bot.service` ichidagi user, group, working directory va Python yo'lini haqiqiy joylashuvingizga moslang. `.env` pydantic-settings orqali working directory'dan o'qiladi. PostgreSQL alohida service bo'lishi va bot serveridan ulanishga ruxsat berishi kerak.
 
 ```sh
 sudo systemctl restart tanishuv-bot
@@ -170,23 +197,12 @@ sudo systemctl stop tanishuv-bot
 
 Startup token/baza xatosi yoki polling konflikti exit code 2 beradi; servis bunday holatda avtomatik restart qilmaydi. Boshqa xatolarda 10 soniyadan keyin restart, besh daqiqada ko'pi bilan besh start. Sabab tuzatilgach zarur bo'lsa `sudo systemctl reset-failed tanishuv-bot` va `sudo systemctl start tanishuv-bot` bajaring.
 
-## Izchil backup
+## Backup
 
-**Ishlayotgan WAL bazasining faqat `.db` faylini ko'chirmang.** Yangi tranzaksiyalar `-wal` faylida bo'lishi mumkin. SQLite backup API izchil nusxa yaratadi. VPS'da `sqlite3` CLI o'rnatilgan bo'lsa, uning `.backup` komandasi shu API'dan foydalanadi:
-
-```sh
-cd /opt/tanishuv
-sudo -u tanishuv mkdir -p backups
-sudo chmod 700 backups
-sudo -u tanishuv sqlite3 data/bot.db '.backup backups/bot-2026-09-17.db'
-sudo chmod 600 backups/bot-2026-09-17.db
-sudo -u tanishuv sqlite3 backups/bot-2026-09-17.db 'PRAGMA integrity_check;'
-```
-
-Har safar yangi sana/vaqtli nom tanlang, mavjud backupni ustidan yozmang. Natija `ok` bo'lsin. Nusxani cheklangan kirishli xavfsiz joyda saqlang. Qo'shimcha sodda variant: servisni to'xtatib, hech qanday yozuvchi process qolmaganini tekshirib, butun `data/` papkasini (mavjud WAL/SHM bilan birga) arxivlang, keyin servisni ishga tushiring. Tiklashdan oldin botni to'xtating, joriy `data/`ni saqlab qo'ying va yangi bo'sh katalogga izchil backupni joylang; eski WAL/SHM'ni boshqa nusxadagi DB bilan aralashtirmang.
+Production PostgreSQL uchun Railway backup siyosati yoki odatiy `pg_dump`/`pg_restore` jarayonidan foydalaning. Backup faylini repositoryga qo'shmang va tiklashni alohida test bazasida muntazam tekshiring. Eski SQLite fayli faqat migratsiyadan oldingi lokal backup bo'lib qoladi.
 
 ## Asosiy fayllar va manbalar
 
 `bot/main.py` — polling va shutdown; `bot/config.py` — `.env`; `bot/db/` — schema/ulanish; `bot/services/` — tranzaksiyalar, qidiruv, moderatsiya, Telegram xatolari; `bot/handlers/` — foydalanuvchi/admin oqimlari; `bot/keyboards/`, `bot/states.py`, `bot/texts.py` — interfeys; `bot/middlewares/` — private-chat, ban, username va cooldown; `alembic/` — migratsiyalar; `tests/` — offline tekshiruvlar; `deploy/` — xizmat namunasi.
 
-Texnik qarorlar uchun rasmiy manbalar: [SQLAlchemy aiosqlite](https://docs.sqlalchemy.org/en/20/dialects/sqlite.html#module-sqlalchemy.dialects.sqlite.aiosqlite), [Pydantic Settings](https://docs.pydantic.dev/latest/concepts/pydantic_settings/), [Telegram Bot API](https://core.telegram.org/bots/api), [SQLite backup API](https://www.sqlite.org/backup.html). Biznes qoidalari ushbu loyiha talablari asosida yozilgan.
+Texnik qarorlar uchun rasmiy manbalar: [SQLAlchemy asyncpg](https://docs.sqlalchemy.org/en/20/dialects/postgresql.html#module-sqlalchemy.dialects.postgresql.asyncpg), [Pydantic Settings](https://docs.pydantic.dev/latest/concepts/pydantic_settings/), [Railway PostgreSQL](https://docs.railway.com/guides/postgresql), [Telegram Bot API](https://core.telegram.org/bots/api). Biznes qoidalari ushbu loyiha talablari asosida yozilgan.

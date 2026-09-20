@@ -10,14 +10,14 @@ from sqlalchemy import (
     Integer,
     String,
     UniqueConstraint,
+    false,
     text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
 def utcnow() -> datetime:
-    # SQLite has no timezone type: every stored timestamp is naive UTC.
-    return datetime.now(UTC).replace(tzinfo=None)
+    return datetime.now(UTC)
 
 
 class Base(DeclarativeBase):
@@ -29,8 +29,8 @@ class User(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True)
     username: Mapped[str | None] = mapped_column(String(64))
-    is_banned: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    is_banned: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     __table_args__ = (CheckConstraint("telegram_id > 0", name="ck_user_telegram_id"),)
 
 
@@ -51,8 +51,10 @@ class Profile(Base):
     max_age: Mapped[int] = mapped_column(Integer, default=99)
     own_city_only: Mapped[bool] = mapped_column(Boolean, default=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
-    consent_at: Mapped[datetime] = mapped_column(DateTime)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+    consent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
     __table_args__ = (
         CheckConstraint("age BETWEEN 18 AND 99", name="ck_profile_age"),
         CheckConstraint(
@@ -80,7 +82,7 @@ class Reaction(Base):
     from_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     to_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     kind: Mapped[str] = mapped_column(String(4))
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     __table_args__ = (
         UniqueConstraint("from_user_id", "to_user_id", name="uq_reaction_pair"),
         CheckConstraint("from_user_id != to_user_id", name="ck_reaction_self"),
@@ -93,7 +95,7 @@ class Match(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     user_low_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     user_high_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     __table_args__ = (
         UniqueConstraint("user_low_id", "user_high_id", name="uq_match_pair"),
         CheckConstraint("user_low_id < user_high_id", name="ck_match_order"),
@@ -105,7 +107,7 @@ class Block(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     blocker_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     blocked_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     __table_args__ = (
         UniqueConstraint("blocker_id", "blocked_id", name="uq_block_pair"),
         CheckConstraint("blocker_id != blocked_id", name="ck_block_self"),
@@ -119,7 +121,7 @@ class Report(Base):
     reported_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     reason: Mapped[str] = mapped_column(String(320))
     status: Mapped[str] = mapped_column(String(8), default="pending", index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     reviewed_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
     __table_args__ = (
         CheckConstraint("reporter_id != reported_user_id", name="ck_report_self"),
@@ -130,6 +132,6 @@ class Report(Base):
             "reporter_id",
             "reported_user_id",
             unique=True,
-            sqlite_where=text("status = 'pending'"),
+            postgresql_where=text("status = 'pending'"),
         ),
     )

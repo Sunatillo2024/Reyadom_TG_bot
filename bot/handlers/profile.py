@@ -169,9 +169,12 @@ async def age_save(message: Message, state: FSMContext, store: Store, user: User
     if len(parts) != 2:
         raise RuleError("Отправь два целых числа, например: 20 35.")
     try:
-        low, high = age_range(int(parts[0]), int(parts[1]))
+        low, high = int(parts[0]), int(parts[1])
     except ValueError:
-        raise RuleError("Возраст должен быть указан двумя целыми числами, например: 20 35.")
+        raise RuleError(
+            "Возраст должен быть указан двумя целыми числами, например: 20 35."
+        ) from None
+    low, high = age_range(low, high)
     profile = await store.profile(user.id)
     if not profile:
         raise RuleError("Анкета не найдена.")

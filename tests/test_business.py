@@ -11,7 +11,7 @@ from aiogram.exceptions import (
     TelegramServerError,
 )
 from aiogram.methods import GetChat, SendMessage
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from bot.db.database import Database
@@ -114,10 +114,6 @@ async def test_unconfirmed_and_database_constraints(store, make_user):
         async with store.db.sessions.begin() as session:
             profile = await session.get(Profile, a.id)
             profile.min_age, profile.max_age = 50, 20
-    async with store.db.sessions() as session:
-        assert await session.scalar(text("PRAGMA foreign_keys")) == 1
-        assert await session.scalar(text("PRAGMA journal_mode")) == "wal"
-        assert await session.scalar(text("PRAGMA busy_timeout")) == 10000
     with pytest.raises(IntegrityError):
         async with store.db.sessions.begin() as session:
             session.add(Reaction(from_user_id=a.id, to_user_id=99999, kind="like"))
@@ -378,7 +374,6 @@ async def test_failed_notification_preserves_match(store, make_user, error):
     calls = []
 
     async def send(recipient, *_args, **_kwargs):
-        assert not store.db.write_lock.locked()
         calls.append(recipient)
         if len(calls) == 1:
             raise failure
@@ -395,7 +390,7 @@ async def test_failed_notification_preserves_match(store, make_user, error):
 async def test_restart_persists_profile_reaction_match(store, make_user):
     a, b = await make_user(), await make_user()
     match_id = await make_match(store, a, b)
-    url = str(store.db.engine.url)
+    url = store.db.engine.url.render_as_string(hide_password=False)
     await store.db.close()
     reopened = Store(Database(url), [900_001])
     try:

@@ -41,9 +41,7 @@ async def _send_profile(
     reply_markup: InlineKeyboardMarkup,
 ) -> None:
     sent = await message.answer_photo(photo_file_id, caption=text, reply_markup=reply_markup)
-    await state.update_data(
-        {MESSAGE_ID_KEY: sent.message_id, PHOTO_ID_KEY: photo_file_id}
-    )
+    await state.update_data(**{MESSAGE_ID_KEY: sent.message_id, PHOTO_ID_KEY: photo_file_id})
 
 
 async def _show_profile(
@@ -81,14 +79,14 @@ async def _show_profile(
             )
     except TelegramBadRequest as exc:
         if "message is not modified" in _edit_error(exc):
-            await state.update_data({PHOTO_ID_KEY: profile.photo_file_id})
+            await state.update_data(**{PHOTO_ID_KEY: profile.photo_file_id})
             return
         if not _message_cannot_be_edited(exc):
             raise
         await _send_profile(message, state, profile.photo_file_id, text, reply_markup)
         return
 
-    await state.update_data({PHOTO_ID_KEY: profile.photo_file_id})
+    await state.update_data(**{PHOTO_ID_KEY: profile.photo_file_id})
 
 
 async def show_next(
