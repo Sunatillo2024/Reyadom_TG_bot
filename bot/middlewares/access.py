@@ -31,9 +31,11 @@ class AccessMiddleware(BaseMiddleware):
     async def __call__(
         self,
         handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
-        event: Message | CallbackQuery,
+        event: TelegramObject,
         data: dict[str, Any],
     ) -> Any:
+        if not isinstance(event, (Message, CallbackQuery)):
+            return None
         callback = isinstance(event, CallbackQuery)
         # Answer even malformed, banned and group callbacks before DB work.
         if callback:
