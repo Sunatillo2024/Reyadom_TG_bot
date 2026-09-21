@@ -30,6 +30,10 @@ class User(Base):
     telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True)
     username: Mapped[str | None] = mapped_column(String(64))
     is_banned: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    premium_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    show_premium_badge: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=text("true")
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     __table_args__ = (CheckConstraint("telegram_id > 0", name="ck_user_telegram_id"),)
 
@@ -50,6 +54,7 @@ class Profile(Base):
     min_age: Mapped[int] = mapped_column(Integer, default=18)
     max_age: Mapped[int] = mapped_column(Integer, default=99)
     own_city_only: Mapped[bool] = mapped_column(Boolean, default=True)
+    premium_radius_km: Mapped[int | None] = mapped_column(Integer)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     consent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(
@@ -72,6 +77,10 @@ class Profile(Base):
         CheckConstraint(
             "longitude IS NULL OR longitude BETWEEN -180 AND 180", name="ck_profile_longitude"
         ),
+        CheckConstraint(
+            "premium_radius_km IS NULL OR premium_radius_km IN (10, 25, 50, 100)",
+            name="ck_profile_premium_radius",
+        ),
         Index("ix_profiles_location", "latitude", "longitude"),
     )
 
@@ -87,6 +96,7 @@ class Reaction(Base):
         UniqueConstraint("from_user_id", "to_user_id", name="uq_reaction_pair"),
         CheckConstraint("from_user_id != to_user_id", name="ck_reaction_self"),
         CheckConstraint("kind IN ('like', 'pass')", name="ck_reaction_kind"),
+        Index("ix_reactions_from_created", "from_user_id", "created_at"),
     )
 
 
@@ -134,4 +144,128 @@ class Report(Base):
             unique=True,
             postgresql_where=text("status = 'pending'"),
         ),
+    )
+
+
+class ProfilePhoto(Base):
+    __tablename__ = "profile_photos"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    file_id: Mapped[str] = mapped_column(String(512))
+    is_primary: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    position: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    __table_args__ = (
+        CheckConstraint("length(file_id) > 0", name="ck_photo_file_id"),
+        CheckConstraint("position >= 0 AND position < 5", name="ck_photo_position"),
+        UniqueConstraint("user_id", "position", name="uq_photo_position"),
+        Index("ix_profile_photos_primary", "user_id", "is_primary"),
+    )
+
+
+class BoostHistory(Base):
+    __tablename__ = "boost_history"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    ends_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    next_available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class PremiumGrant(Base):
+    __tablename__ = "premium_grants"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    granted_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    action: Mapped[str] = mapped_column(String(10))
+    plan_code: Mapped[str | None] = mapped_column(String(20))
+    event_id: Mapped[str | None] = mapped_column(String(128))
+    source: Mapped[str] = mapped_column(String(10), default="admin", server_default="admin")
+    order_id: Mapped[str | None] = mapped_column(
+        ForeignKey("premium_orders.id"), index=True
+    )
+    previous_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    new_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    starts_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reversed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    __table_args__ = (
+        CheckConstraint("action IN ('grant', 'revoke', 'refund')", name="ck_grant_action"),
+        CheckConstraint("source IN ('admin', 'stars')", name="ck_grant_source"),
+        CheckConstraint(
+            "plan_code IS NULL OR plan_code IN ('premium_3d', 'premium_1m', 'premium_3m')",
+            name="ck_grant_plan",
+        ),
+        UniqueConstraint("event_id", name="uq_grant_event_id"),
+        Index("ix_premium_grants_event_id", "event_id"),
+    )
+
+
+class PremiumOrder(Base):
+    __tablename__ = "premium_orders"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    buyer_telegram_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    plan_code: Mapped[str] = mapped_column(String(20))
+    price_stars: Mapped[int] = mapped_column(Integer)
+    currency: Mapped[str] = mapped_column(String(3), default="XTR", server_default="XTR")
+    duration_value: Mapped[int] = mapped_column(Integer)
+    duration_unit: Mapped[str] = mapped_column(String(6))
+    status: Mapped[str] = mapped_column(String(20), index=True)
+    terms_accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    invoice_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    notification_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+    __table_args__ = (
+        CheckConstraint(
+            "plan_code IN ('premium_3d', 'premium_1m', 'premium_3m')",
+            name="ck_premium_order_plan",
+        ),
+        CheckConstraint("price_stars > 0", name="ck_premium_order_price"),
+        CheckConstraint("currency = 'XTR'", name="ck_premium_order_currency"),
+        CheckConstraint("duration_value > 0", name="ck_premium_order_duration"),
+        CheckConstraint(
+            "duration_unit IN ('days', 'months')", name="ck_premium_order_duration_unit"
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'invoice_sending', 'invoice_sent', 'invoice_error', "
+            "'checkout', 'completed', 'review', 'refund_pending', 'refund_unknown', "
+            "'refunded')",
+            name="ck_premium_order_status",
+        ),
+        Index("ix_premium_orders_user_plan", "user_id", "plan_code", "status"),
+    )
+
+
+class PremiumPayment(Base):
+    __tablename__ = "premium_payments"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    order_id: Mapped[str | None] = mapped_column(
+        ForeignKey("premium_orders.id"), index=True
+    )
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), index=True)
+    buyer_telegram_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    telegram_payment_charge_id: Mapped[str] = mapped_column(String(128), unique=True)
+    provider_payment_charge_id: Mapped[str | None] = mapped_column(String(128))
+    invoice_payload: Mapped[str] = mapped_column(String(128))
+    currency: Mapped[str] = mapped_column(String(3))
+    amount: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(20), index=True)
+    failure_reason: Mapped[str | None] = mapped_column(String(255))
+    paid_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    refunded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    __table_args__ = (
+        CheckConstraint("amount > 0", name="ck_premium_payment_amount"),
+        CheckConstraint(
+            "status IN ('completed', 'review', 'refund_pending', 'refund_unknown', 'refunded')",
+            name="ck_premium_payment_status",
+        ),
+        Index("ix_premium_payments_order_status", "order_id", "status"),
     )

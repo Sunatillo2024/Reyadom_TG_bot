@@ -45,6 +45,85 @@ async def ban_command(message: Message, store: Store) -> None:
     )
 
 
+@router.message(Command("premium_grant"))
+async def premium_grant_command(message: Message, store: Store) -> None:
+    if message.from_user is None:
+        raise RuleError("Не удалось определить отправителя команды.")
+    store.require_admin(message.from_user.id)
+    if message.text is None:
+        raise RuleError("Формат: /premium_grant TELEGRAM_ID PLAN_CODE")
+    parts = message.text.split()
+    if len(parts) != 3:
+        raise RuleError(
+            "Формат: /premium_grant TELEGRAM_ID PLAN_CODE\n"
+            "План: premium_3d, premium_1m, premium_3m"
+        )
+
+    target_telegram_id = target_id(parts[1])
+    plan_code = parts[2]
+
+    if plan_code not in {"premium_3d", "premium_1m", "premium_3m"}:
+        raise RuleError("План должен быть: premium_3d, premium_1m или premium_3m")
+
+    event_id = f"admin_{message.from_user.id}_{target_telegram_id}_{message.message_id}"
+    new_until = await store.grant_premium_by_telegram(
+        message.from_user.id, target_telegram_id, plan_code, event_id
+    )
+
+    await message.answer(
+        f"<b>Premium выдан</b>\n"
+        f"Пользователь: <code>{target_telegram_id}</code>\n"
+        f"План: {plan_code}\n"
+        f"Действует до: {new_until.strftime('%d.%m.%Y %H:%M UTC')}"
+    )
+
+
+@router.message(Command("premium_status"))
+async def premium_status_command(message: Message, store: Store) -> None:
+    if message.from_user is None:
+        raise RuleError("Не удалось определить отправителя команды.")
+    store.require_admin(message.from_user.id)
+    if message.text is None:
+        raise RuleError("Формат: /premium_status TELEGRAM_ID")
+    parts = message.text.split()
+    if len(parts) != 2:
+        raise RuleError("Формат: /premium_status TELEGRAM_ID")
+
+    target_telegram_id = target_id(parts[1])
+    status = await store.premium_status_info(target_telegram_id)
+
+    await message.answer(
+        f"<b>Premium статус</b>\n"
+        f"Пользователь: <code>{target_telegram_id}</code>\n"
+        f"Статус: {'Активен' if status['is_premium'] else 'Нет Premium'}\n"
+        + (
+            f"Действует до: {status['until'].strftime('%d.%m.%Y %H:%M UTC')}\n"
+            f"Осталось дней: {status['days_left']}"
+            if status["is_premium"] and status["until"]
+            else ""
+        )
+    )
+
+
+@router.message(Command("premium_revoke"))
+async def premium_revoke_command(message: Message, store: Store) -> None:
+    if message.from_user is None:
+        raise RuleError("Не удалось определить отправителя команды.")
+    store.require_admin(message.from_user.id)
+    if message.text is None:
+        raise RuleError("Формат: /premium_revoke TELEGRAM_ID")
+    parts = message.text.split()
+    if len(parts) != 2:
+        raise RuleError("Формат: /premium_revoke TELEGRAM_ID")
+
+    target_telegram_id = target_id(parts[1])
+    await store.revoke_premium_by_telegram(message.from_user.id, target_telegram_id)
+
+    await message.answer(
+        f"<b>Premium отозван</b>\n" f"Пользователь: <code>{target_telegram_id}</code>"
+    )
+
+
 @router.callback_query(F.data.startswith("admin:"))
 async def admin_callback(callback: CallbackQuery, store: Store) -> None:
     store.require_admin(callback.from_user.id)

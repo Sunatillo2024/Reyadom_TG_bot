@@ -1,19 +1,88 @@
+# Environment variables (keep .env.example)
 .env
 .env.*
 !.env.example
+
+# Version control
 .git
+.gitignore
+.gitattributes
+
+# Python virtual environments
 .venv*
+venv*
+ENV*
+env*
+
+# Python bytecode and cache
 __pycache__/
 *.py[cod]
+*$py.class
+*.so
+.Python
+
+# Testing
+tests/
 .pytest_cache/
-.ruff_cache/
 .coverage
+.coverage.*
 htmlcov/
+.tox/
+.nox/
+*.cover
+.hypothesis/
+
+# Linting and formatting
+.ruff_cache/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# IDEs and editors
 .idea/
+.vscode/
 .codex/
+*.swp
+*.swo
+*~
+
+# AI assistant artifacts
+.aider*
+.claude/
+AGENTS.md
+achot.md
+
+# Documentation (only for development)
+*.md
+!README.md
+
+# Database files (local development only)
 data/
 backups/
 *.db
 *.db-*
 *.sqlite*
+
+# Logs
+*.log
+logs/
+
+# Build artifacts
+*.egg-info/
+dist/
+build/
 *.bak
+
+# OS files
+.DS_Store
+Thumbs.db
+.DS_Store
+
+# Temporary files
+*.tmp
+*.temp
+
+# Docker compose (development only)
+docker-compose.yml
+docker-compose.*.yml
+Dockerfile.dev

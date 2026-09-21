@@ -15,6 +15,7 @@ from aiogram.types import (
     Chat,
     ChatFullInfo,
     InlineKeyboardMarkup,
+    InputMediaPhoto,
     Location,
     Message,
     PhotoSize,
@@ -24,7 +25,14 @@ from aiogram.types import (
 from sqlalchemy import select
 
 from bot.db.models import Match, Report
-from bot.handlers.discovery import MESSAGE_ID_KEY, PHOTO_ID_KEY, _show_profile, show_next
+from bot.handlers.discovery import (
+    CURRENT_PROFILE_KEY,
+    MESSAGE_ID_KEY,
+    PHOTO_ID_KEY,
+    PHOTO_INDEX_KEY,
+    _show_profile,
+    show_next,
+)
 from bot.keyboards.common import decisions
 from bot.main import create_dispatcher
 from bot.services.telegram import caption
@@ -174,13 +182,20 @@ async def test_full_dispatcher_flow_offline(store, make_user, monkeypatch):
         assert (await store.profile(user.id)).latitude == 42.88
 
         other = await make_user(latitude=42.87, longitude=74.58)
+        # Premium and help remain distinct routes in the reply keyboard.
+        await feed(text=MENU_LABELS[5])
+        assert "Premium — больше шансов" in last_text()
+        assert "30  →  <b>без ограничений</b>" in last_text()
+        assert "1 фото  →  <b>до 5 фото</b>" in last_text()
+        await feed(text=MENU_LABELS[6])
+        assert "❔ Помощь" in last_text()
         # The previous Russian help button remains routable too.
-        await feed(text=PREVIOUS_MENU_LABELS[5])
+        await feed(text=PREVIOUS_MENU_LABELS[6])
         assert "❔ Помощь" in last_text()
         # Existing Uzbek reply keyboards remain usable after the UI translation.
         await feed(text=LEGACY_MENU_LABELS[0])
         assert isinstance(calls[-1], SendPhoto)
-        assert "user_" not in calls[-1].caption
+        assert "user_" not in (calls[-1].caption or "")
         await feed(callback=f"react:{other.id}:like:d")
         assert any(
             isinstance(call, SendMessage) and "понравилась твоя анкета" in call.text
@@ -290,11 +305,11 @@ async def test_ten_discovery_profiles_reuse_one_message(store, make_user):
         answer_photo=AsyncMock(return_value=SimpleNamespace(message_id=profile_message_id)),
     )
 
-    await show_next(message, state, store, actor)
+    await show_next(cast(Message, message), cast(Any, state), store, actor)
     for candidate in candidates[:9]:
         result = await store.decide(actor.id, candidate.id, "pass")
         assert result.created
-        await show_next(message, state, store, actor)
+        await show_next(cast(Message, message), cast(Any, state), store, actor)
 
     message.answer_photo.assert_awaited_once()
     assert bot.edit_message_caption.await_count == 1
@@ -330,7 +345,7 @@ async def test_discovery_edit_failure_handling(store, make_user):
     method = EditMessageMedia(
         chat_id=candidate.telegram_id,
         message_id=77,
-        media={"type": "photo", "media": "new-photo"},
+        media=InputMediaPhoto(media="new-photo"),
     )
     state = AsyncMock()
     state.get_data.return_value = {MESSAGE_ID_KEY: 77, PHOTO_ID_KEY: "old-photo"}
@@ -344,17 +359,19 @@ async def test_discovery_edit_failure_handling(store, make_user):
     bot.edit_message_media.side_effect = TelegramBadRequest(
         method=method, message="Bad Request: message is not modified"
     )
-    await _show_profile(message, state, profile, False)
+    await _show_profile(cast(Message, message), state, profile, False)
     message.answer_photo.assert_not_awaited()
 
     bot.edit_message_media.side_effect = TelegramBadRequest(
         method=method, message="Bad Request: message to edit not found"
     )
-    await _show_profile(message, state, profile, False)
+    await _show_profile(cast(Message, message), state, profile, False)
     message.answer_photo.assert_awaited_once()
     assert state.update_data.await_args.kwargs == {
         MESSAGE_ID_KEY: 88,
         PHOTO_ID_KEY: "new-photo",
+        CURRENT_PROFILE_KEY: candidate.id,
+        PHOTO_INDEX_KEY: 0,
     }
 
     message.answer_photo.reset_mock()
@@ -362,5 +379,5 @@ async def test_discovery_edit_failure_handling(store, make_user):
         method=method, message="Bad Request: wrong file identifier"
     )
     with pytest.raises(TelegramBadRequest, match="wrong file identifier"):
-        await _show_profile(message, state, profile, False)
+        await _show_profile(cast(Message, message), state, profile, False)
     message.answer_photo.assert_not_awaited()

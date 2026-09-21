@@ -2,6 +2,7 @@ import asyncio
 import logging
 import sys
 from collections.abc import AsyncGenerator
+from contextlib import suppress
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher, Router
@@ -26,12 +27,35 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from bot.config import Settings
 from bot.db.database import Database
-from bot.handlers import admin, discovery, matches, moderation, profile, registration, start
+from bot.handlers import (
+    admin,
+    discovery,
+    matches,
+    moderation,
+    payments,
+    premium,
+    profile,
+    registration,
+    start,
+)
 from bot.middlewares.access import AccessMiddleware
+from bot.services.payments import PaymentService
 from bot.services.store import Store
 
 logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+async def payment_notification_loop(bot: Bot, store: Store) -> None:
+    """Retry committed purchase notifications without touching entitlements."""
+    service = PaymentService(store)
+    while True:
+        try:
+            for order in await service.pending_notifications():
+                await payments.deliver_payment_notification(bot, service, order.id)
+        except Exception as exc:
+            logger.warning("Ошибка повтора платёжных уведомлений: %s", type(exc).__name__)
+        await asyncio.sleep(60)
 
 
 def migration_head() -> str:
@@ -78,13 +102,16 @@ class PollingDispatcher(Dispatcher):
 
 def create_dispatcher(store: Store) -> Dispatcher:
     dispatcher = PollingDispatcher(storage=MemoryStorage(), events_isolation=SimpleEventIsolation())
+    dispatcher["store"] = store
     access = AccessMiddleware(store)
     dispatcher.message.outer_middleware(access)
     dispatcher.callback_query.outer_middleware(access)
     # Commands precede forms so /cancel, /privacy and /delete work at every step.
     dispatcher.include_routers(
+        payments.router,
         start.router,
         admin.router,
+        premium.router,
         profile.router,
         discovery.router,
         matches.router,
@@ -130,9 +157,10 @@ async def run(settings: Settings) -> int:
         )
         return 2
     db = Database(settings.database_url)
-    store = Store(db, settings.admin_ids)
+    store = Store(db, settings.admin_ids, stars_sales_enabled=settings.stars_sales_enabled)
     bot = Bot(token, default=DefaultBotProperties(parse_mode="HTML"))
     dispatcher = create_dispatcher(store)
+    notification_task: asyncio.Task[None] | None = None
     try:
         try:
             async with db.engine.connect() as connection:
@@ -147,6 +175,8 @@ async def run(settings: Settings) -> int:
                 BotCommand(command="start", description="Меню и регистрация"),
                 BotCommand(command="help", description="Помощь"),
                 BotCommand(command="privacy", description="Конфиденциальность"),
+                BotCommand(command="terms", description="Условия покупки Premium"),
+                BotCommand(command="paysupport", description="Поддержка по платежам"),
                 BotCommand(command="cancel", description="Отменить действие"),
                 BotCommand(command="id", description="Мой Telegram ID"),
                 BotCommand(command="delete", description="Удалить анкету"),
@@ -155,6 +185,7 @@ async def run(settings: Settings) -> int:
         # Keep pending updates. Never drop registration decisions on startup.
         await bot.delete_webhook(drop_pending_updates=False)
         logger.info("Запускается опрос Telegram для бота знакомств")
+        notification_task = asyncio.create_task(payment_notification_loop(bot, store))
         await dispatcher.start_polling(
             bot,
             close_bot_session=False,
@@ -168,6 +199,10 @@ async def run(settings: Settings) -> int:
         logger.error("С этим токеном уже работает другой процесс опроса; остановите его")
         return 2
     finally:
+        if notification_task:
+            notification_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await notification_task
         await dispatcher.fsm.close()
         await bot.session.close()
         await db.close()

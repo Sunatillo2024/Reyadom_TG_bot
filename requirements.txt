@@ -3,6 +3,7 @@ SQLAlchemy[asyncio]==2.0.43
 asyncpg==0.30.0
 pydantic-settings==2.10.1
 alembic==1.16.5
+python-dateutil==2.9.0.post0
 
 # Python 3.11.9 muhitida tekshirilgan tranzitiv bog'liqliklar.
 aiofiles==24.1.0

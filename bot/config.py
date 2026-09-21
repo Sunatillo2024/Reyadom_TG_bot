@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     admin_ids: list[int] = Field(default_factory=list)
     database_url: str
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+    stars_sales_enabled: bool = True
 
     @field_validator("database_url")
     @classmethod

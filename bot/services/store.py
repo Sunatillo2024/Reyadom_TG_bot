@@ -1,6 +1,6 @@
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Any
+from datetime import UTC, datetime
+from typing import Any, cast
 
 from sqlalchemy import and_, case, delete, exists, func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert
@@ -8,7 +8,30 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from bot.db.database import Database
-from bot.db.models import Block, Match, Profile, Reaction, Report, User
+from bot.db.models import (
+    Block,
+    BoostHistory,
+    Match,
+    PremiumGrant,
+    Profile,
+    ProfilePhoto,
+    Reaction,
+    Report,
+    User,
+    utcnow,
+)
+from bot.services.premium import (
+    BOOST_COOLDOWN_HOURS,
+    BOOST_DURATION_MINUTES,
+    FREE_DAILY_LIKES,
+    FREE_PHOTO_LIMIT,
+    PREMIUM_PHOTO_LIMIT,
+    calculate_premium_end,
+    daily_limit_start,
+    has_premium,
+    photo_limit,
+    premium_status,
+)
 from bot.services.validation import (
     RuleError,
     age_range,
@@ -26,14 +49,17 @@ class Decision:
     recipient_telegram_id: int | None = None
 
 
-def pair_clause(left, right, actor: int, target: int):
+def pair_clause(left: Any, right: Any, actor: Any, target: Any):
     return or_(and_(left == actor, right == target), and_(left == target, right == actor))
 
 
 class Store:
-    def __init__(self, db: Database, admin_ids: list[int]) -> None:
+    def __init__(
+        self, db: Database, admin_ids: list[int], *, stars_sales_enabled: bool = True
+    ) -> None:
         self.db = db
         self.admin_ids = frozenset(admin_ids)
+        self.stars_sales_enabled = stars_sales_enabled
 
     async def sync_user(self, telegram_id: int, username: str | None) -> User:
         async with self.db.sessions.begin() as session:
@@ -46,6 +72,8 @@ class Store:
                 .returning(User.id)
             )
             user = await session.get(User, user_id)
+            if user is None:
+                raise RuleError("Пользователь не найден.")
             if not username:
                 profile = await session.get(Profile, user.id)
                 if profile:
@@ -106,6 +134,16 @@ class Store:
             if await session.get(Profile, actor):
                 raise RuleError("Анкета уже существует. Измени её в разделе «Моя анкета».")
             session.add(Profile(user_id=actor, consent_at=draft["consent_at"], **values))
+            # Migrate first photo to ProfilePhoto table
+            session.add(
+                ProfilePhoto(
+                    user_id=actor,
+                    file_id=values["photo_file_id"],
+                    is_primary=True,
+                    position=0,
+                    created_at=draft["consent_at"],
+                )
+            )
 
     async def edit_profile(self, actor: int, field: str, value: Any) -> None:
         if field in {"name", "city", "bio"}:
@@ -169,6 +207,8 @@ class Store:
             await session.execute(
                 delete(Match).where(or_(Match.user_low_id == actor, Match.user_high_id == actor))
             )
+            await session.execute(delete(ProfilePhoto).where(ProfilePhoto.user_id == actor))
+            await session.execute(delete(BoostHistory).where(BoostHistory.user_id == actor))
             await session.execute(delete(Profile).where(Profile.user_id == actor))
             user = await session.get(User, actor)
             if user:
@@ -201,8 +241,18 @@ class Store:
             ),
             else_=None,
         ).label("distance_km")
+
+        # Boost priority: profiles with active boost have priority=1, others priority=0
+        now = func.now()
+        has_boost = exists().where(
+            BoostHistory.user_id == Profile.user_id,
+            BoostHistory.started_at <= now,
+            BoostHistory.ends_at > now,
+        )
+        boost_priority = case((has_boost, 1), else_=0).label("boost_priority")
+
         query = (
-            select(Profile, distance)
+            select(Profile, distance, boost_priority)
             .join(User, User.id == Profile.user_id)
             .join(own, own.user_id == actor)
             .join(owner, owner.id == actor)
@@ -234,6 +284,16 @@ class Store:
                 ),
             )
         )
+
+        # Apply premium radius filter if set
+        query = query.where(
+            or_(
+                own.premium_radius_km.is_(None),
+                ~has_locations,
+                distance <= own.premium_radius_km,
+            )
+        )
+
         if decisions:
             query = query.where(
                 ~exists().where(
@@ -256,7 +316,8 @@ class Store:
                     Reaction.kind == "like",
                 )
             )
-        return query.order_by(distance.is_(None), distance, Profile.user_id)
+        # Sort by: boost (descending), distance (nulls last), then user_id
+        return query.order_by(boost_priority.desc(), distance.is_(None), distance, Profile.user_id)
 
     async def next_profile(self, actor: int, incoming: bool = False) -> Profile | None:
         async with self.db.sessions() as session:
@@ -265,9 +326,28 @@ class Store:
             row = result.first()
             if not row:
                 return None
-            profile, distance = row
+            profile, distance, boost_priority = row
             profile.distance_km = round(float(distance), 1) if distance is not None else None
             return profile
+
+    async def can_send_like(
+        self, user: User, likes_today: int, now: datetime | None = None
+    ) -> tuple[bool, str]:
+        """Check if user can send a like considering Premium status and daily limit."""
+        if has_premium(user, now):
+            return True, ""
+
+        if likes_today >= FREE_DAILY_LIKES:
+            from bot.services.premium import daily_limit_reset_at
+
+            reset_at = daily_limit_reset_at(now)
+            return (
+                False,
+                f"Лимит {FREE_DAILY_LIKES} лайков исчерпан.\n"
+                f"Следующее обновление: {reset_at.strftime('%H:%M')} UTC.\n\n"
+                "💎 Premium снимает лимит лайков.",
+            )
+        return True, ""
 
     async def decide(self, actor: int, target: int, kind: str) -> Decision:
         if kind not in {"like", "pass"} or actor == target:
@@ -275,7 +355,28 @@ class Store:
         async with self.db.sessions.begin() as session:
             low, high = sorted((actor, target))
             await session.execute(select(func.pg_advisory_xact_lock(low, high)))
-            await self._actor(session, actor, active=True)
+            user = await self._actor(session, actor, active=True)
+
+            # Check like limit before creating reaction
+            if kind == "like":
+                # Count likes within this transaction to avoid nested sessions
+                from bot.services.premium import daily_limit_start
+
+                now = utcnow()
+                start_of_day = daily_limit_start(now)
+                likes_today = await session.scalar(
+                    select(func.count())
+                    .select_from(Reaction)
+                    .where(
+                        Reaction.from_user_id == actor,
+                        Reaction.kind == "like",
+                        Reaction.created_at >= start_of_day,
+                    )
+                )
+                can_like, error_msg = await self.can_send_like(user, likes_today or 0, now)
+                if not can_like:
+                    raise RuleError(error_msg)
+
             previous = await session.scalar(
                 select(Reaction.id).where(
                     Reaction.from_user_id == actor, Reaction.to_user_id == target
@@ -299,6 +400,8 @@ class Store:
             if reaction_id is None:
                 return Decision(False)
             other = await session.get(User, target)
+            if other is None:
+                raise RuleError("Пользователь не найден.")
             reverse = await session.scalar(
                 select(Reaction).where(
                     Reaction.from_user_id == target,
@@ -369,7 +472,7 @@ class Store:
                 .offset(page * 5)
                 .limit(5)
             )
-            return list((await session.execute(query)).all())
+            return [(match, profile) for match, profile in (await session.execute(query)).all()]
 
     async def _moderation_target(self, session: AsyncSession, actor: int, target: int) -> None:
         await self._actor(session, actor)
@@ -434,17 +537,19 @@ class Store:
     async def stats(self, telegram_id: int) -> tuple[int, int, int, int]:
         self.require_admin(telegram_id)
         async with self.db.sessions() as session:
-            users = await session.scalar(select(func.count()).select_from(User))
+            users = (await session.scalar(select(func.count()).select_from(User))) or 0
             profiles = await session.scalar(
                 select(func.count())
                 .select_from(Profile)
                 .join(User, User.id == Profile.user_id)
                 .where(Profile.is_active.is_(True), User.is_banned.is_(False))
             )
-            matches = await session.scalar(select(func.count()).select_from(Match))
+            profiles = profiles or 0
+            matches = (await session.scalar(select(func.count()).select_from(Match))) or 0
             reports = await session.scalar(
                 select(func.count()).select_from(Report).where(Report.status == "pending")
             )
+            reports = reports or 0
             return users, profiles, matches, reports
 
     async def report_page(self, telegram_id: int, page: int) -> list[Report]:
@@ -485,6 +590,8 @@ class Store:
                 report.status, report.reviewed_by = "reviewed", admin.id
             else:
                 user = await session.get(User, report.reported_user_id)
+                if user is None:
+                    raise RuleError("Пользователь не найден.")
                 user.is_banned = action == "ban"
                 if action == "ban" and (profile := await session.get(Profile, user.id)):
                     profile.is_active = False
@@ -500,3 +607,519 @@ class Store:
             user.is_banned = banned
             if banned and (profile := await session.get(Profile, user.id)):
                 profile.is_active = False
+
+    # Premium methods
+
+    async def grant_premium(
+        self, admin_id: int | None, user_id: int, plan_code: str, event_id: str | None = None
+    ) -> datetime:
+        """Grant Premium to user. Returns new premium_until."""
+        async with self.db.sessions.begin() as session:
+            return await self.grant_premium_in_session(
+                session,
+                admin_id,
+                user_id,
+                plan_code,
+                event_id=event_id,
+                source="admin",
+            )
+
+    async def grant_premium_in_session(
+        self,
+        session: AsyncSession,
+        admin_id: int | None,
+        user_id: int,
+        plan_code: str,
+        *,
+        event_id: str | None,
+        source: str,
+        order_id: str | None = None,
+        now: datetime | None = None,
+    ) -> datetime:
+        """Grant or extend Premium inside the caller's transaction."""
+        from bot.services.premium import PREMIUM_PLANS
+
+        if plan_code not in PREMIUM_PLANS or source not in {"admin", "stars"}:
+            raise RuleError("Недопустимый план Premium.")
+        if event_id:
+            existing = await session.scalar(
+                select(PremiumGrant).where(PremiumGrant.event_id == event_id)
+            )
+            if existing and existing.new_until:
+                return existing.new_until
+
+        user = await session.scalar(select(User).where(User.id == user_id).with_for_update())
+        if not user:
+            raise RuleError("Пользователь не найден.")
+
+        granted_at = now or datetime.now(UTC)
+        previous_until = user.premium_until
+        starts_at = max(granted_at, previous_until) if previous_until else granted_at
+        new_until = calculate_premium_end(previous_until, cast(Any, plan_code), granted_at)
+        user.premium_until = new_until
+
+        session.add(
+            PremiumGrant(
+                user_id=user_id,
+                granted_by=admin_id,
+                action="grant",
+                plan_code=plan_code,
+                event_id=event_id,
+                source=source,
+                order_id=order_id,
+                previous_until=previous_until,
+                new_until=new_until,
+                starts_at=starts_at,
+                ends_at=new_until,
+                created_at=granted_at,
+            )
+        )
+
+        return new_until
+
+    async def grant_premium_by_telegram(
+        self,
+        admin_telegram_id: int,
+        target_telegram_id: int,
+        plan_code: str,
+        event_id: str | None = None,
+    ) -> datetime:
+        """Grant Premium by Telegram ID. Requires admin privileges."""
+        self.require_admin(admin_telegram_id)
+        async with self.db.sessions() as session:
+            admin = await session.scalar(select(User).where(User.telegram_id == admin_telegram_id))
+            target = await session.scalar(
+                select(User).where(User.telegram_id == target_telegram_id)
+            )
+            if not target:
+                raise RuleError("Пользователь не найден.")
+            admin_id = admin.id if admin else None
+            target_id = target.id
+        return await self.grant_premium(admin_id, target_id, plan_code, event_id)
+
+    async def revoke_premium(self, admin_id: int | None, user_id: int) -> None:
+        """Revoke Premium from user."""
+        async with self.db.sessions.begin() as session:
+            user = await session.scalar(select(User).where(User.id == user_id).with_for_update())
+            if not user:
+                raise RuleError("Пользователь не найден.")
+
+            previous_until = user.premium_until
+            user.premium_until = None
+
+            # Clear Premium-specific settings
+            profile = await session.get(Profile, user_id)
+            if profile:
+                profile.premium_radius_km = None
+
+            now = datetime.now(UTC)
+            session.add(
+                PremiumGrant(
+                    user_id=user_id,
+                    granted_by=admin_id,
+                    action="revoke",
+                    plan_code=None,
+                    event_id=None,
+                    source="admin",
+                    previous_until=previous_until,
+                    new_until=None,
+                    created_at=now,
+                )
+            )
+
+    async def revoke_premium_by_telegram(
+        self, admin_telegram_id: int, target_telegram_id: int
+    ) -> None:
+        """Revoke Premium by Telegram ID. Requires admin privileges."""
+        self.require_admin(admin_telegram_id)
+        async with self.db.sessions() as session:
+            admin = await session.scalar(select(User).where(User.telegram_id == admin_telegram_id))
+            target = await session.scalar(
+                select(User).where(User.telegram_id == target_telegram_id)
+            )
+            if not target:
+                raise RuleError("Пользователь не найден.")
+            admin_id = admin.id if admin else None
+            target_id = target.id
+        await self.revoke_premium(admin_id, target_id)
+
+    async def premium_status_info(self, target_telegram_id: int) -> dict[str, Any]:
+        """Get Premium status info for a user by telegram_id."""
+        async with self.db.sessions() as session:
+            user = await session.scalar(
+                select(User).where(User.telegram_id == target_telegram_id)
+            )
+            if not user:
+                raise RuleError("Пользователь не найден.")
+            status = premium_status(user)
+            return {
+                "is_premium": status.is_premium,
+                "until": status.until,
+                "days_left": status.days_left,
+            }
+
+    async def toggle_premium_badge(self, user_id: int) -> bool:
+        """Toggle show_premium_badge setting for user. Returns new value."""
+        async with self.db.sessions.begin() as session:
+            user = await session.get(User, user_id)
+            if not user:
+                raise RuleError("Пользователь не найден.")
+            user.show_premium_badge = not user.show_premium_badge
+            return user.show_premium_badge
+
+    async def undo_last_pass(self, actor: int) -> Profile | None:
+        """Undo last pass reaction and return the un-passed profile."""
+        async with self.db.sessions.begin() as session:
+            await self._actor(session, actor, active=True)
+            target = await session.scalar(
+                select(Reaction.to_user_id)
+                .where(Reaction.from_user_id == actor, Reaction.kind == "pass")
+                .order_by(Reaction.created_at.desc())
+                .limit(1)
+            )
+            if not target:
+                return None
+
+            await session.execute(
+                delete(Reaction).where(
+                    Reaction.from_user_id == actor,
+                    Reaction.to_user_id == target,
+                    Reaction.kind == "pass",
+                )
+            )
+            return await session.get(Profile, target)
+
+    async def count_likes_today(self, user_id: int, now: datetime | None = None) -> int:
+        """Count likes sent today by user."""
+        if now is None:
+            from datetime import UTC
+
+            now = datetime.now(UTC)
+
+        start_of_day = daily_limit_start(now)
+
+        async with self.db.sessions() as session:
+            count = await session.scalar(
+                select(func.count())
+                .select_from(Reaction)
+                .where(
+                    Reaction.from_user_id == user_id,
+                    Reaction.kind == "like",
+                    Reaction.created_at >= start_of_day,
+                )
+            )
+            return count or 0
+
+    async def count_undos_today(self, user_id: int) -> int:
+        """Count undo operations today. (Placeholder - implement when undo tracking is added)"""
+        # This would need a separate undo_history table or reaction modification tracking
+        # For now, return 0 as undo feature is not yet implemented
+        return 0
+
+    async def record_undo(self, user_id: int, target_id: int, now: datetime) -> None:
+        """Record an undo operation. (Placeholder - implement when undo feature is added)"""
+        # This would delete the most recent pass reaction and optionally log it
+        async with self.db.sessions.begin() as session:
+            await session.execute(
+                delete(Reaction).where(
+                    Reaction.from_user_id == user_id,
+                    Reaction.to_user_id == target_id,
+                    Reaction.kind == "pass",
+                )
+            )
+
+    async def last_pass_target(self, user_id: int) -> int | None:
+        """Get the last profile user passed on."""
+        async with self.db.sessions() as session:
+            result = await session.scalar(
+                select(Reaction.to_user_id)
+                .where(Reaction.from_user_id == user_id, Reaction.kind == "pass")
+                .order_by(Reaction.created_at.desc())
+                .limit(1)
+            )
+            return result
+
+    # Profile photos (multiple photos)
+
+    async def get_profile_photos(self, user_id: int) -> list[ProfilePhoto]:
+        """Get all photos for user, ordered by position."""
+        async with self.db.sessions() as session:
+            return list(
+                await session.scalars(
+                    select(ProfilePhoto)
+                    .where(ProfilePhoto.user_id == user_id)
+                    .order_by(ProfilePhoto.position)
+                )
+            )
+
+    async def add_profile_photo(self, user_id: int, file_id: str) -> ProfilePhoto:
+        """Add a new photo to user's profile. Checks Premium photo limit."""
+        async with self.db.sessions.begin() as session:
+            user = await session.get(User, user_id)
+            if not user:
+                raise RuleError("Пользователь не найден.")
+
+            existing_count = (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(ProfilePhoto)
+                    .where(ProfilePhoto.user_id == user_id)
+                )
+                or 0
+            )
+
+            limit = photo_limit(user)
+            if existing_count >= limit:
+                if limit == FREE_PHOTO_LIMIT:
+                    raise RuleError(
+                        f"Достигнут лимит фото ({limit}).\n\n"
+                        f"💎 Premium позволяет добавить до {PREMIUM_PHOTO_LIMIT} фото."
+                    )
+                else:
+                    raise RuleError(f"Достигнут лимит фото ({limit}).")
+
+            # Find next available position
+            max_position = await session.scalar(
+                select(func.max(ProfilePhoto.position)).where(ProfilePhoto.user_id == user_id)
+            )
+            next_position = (max_position + 1) if max_position is not None else 0
+
+            photo = ProfilePhoto(
+                user_id=user_id,
+                file_id=file_id,
+                is_primary=(existing_count == 0),
+                position=next_position,
+            )
+            session.add(photo)
+            await session.flush()
+            await session.refresh(photo)
+            return photo
+
+    async def remove_profile_photo(self, user_id: int, photo_id: int) -> None:
+        """Remove a photo. Cannot remove if it's the only photo."""
+        async with self.db.sessions.begin() as session:
+            photo_count = await session.scalar(
+                select(func.count())
+                .select_from(ProfilePhoto)
+                .where(ProfilePhoto.user_id == user_id)
+            )
+
+            if photo_count is None or photo_count <= 1:
+                raise RuleError("Нельзя удалить единственное фото. Сначала добавь другое.")
+
+            photo = await session.get(ProfilePhoto, photo_id)
+            if not photo or photo.user_id != user_id:
+                raise RuleError("Фото не найдено.")
+
+            was_primary = photo.is_primary
+            await session.delete(photo)
+
+            # If removed photo was primary, set another as primary
+            if was_primary:
+                new_primary = await session.scalar(
+                    select(ProfilePhoto)
+                    .where(ProfilePhoto.user_id == user_id)
+                    .order_by(ProfilePhoto.position)
+                    .limit(1)
+                )
+                if new_primary:
+                    new_primary.is_primary = True
+
+    async def set_primary_photo(self, user_id: int, photo_id: int) -> None:
+        """Set a photo as primary (main profile photo)."""
+        async with self.db.sessions.begin() as session:
+            photo = await session.get(ProfilePhoto, photo_id)
+            if not photo or photo.user_id != user_id:
+                raise RuleError("Фото не найдено.")
+
+            # Unset all other primary flags
+            await session.execute(
+                select(ProfilePhoto)
+                .where(ProfilePhoto.user_id == user_id, ProfilePhoto.is_primary.is_(True))
+                .with_for_update()
+            )
+
+            # Set new primary
+            photo.is_primary = True
+
+            # Update Profile.photo_file_id to match
+            profile = await session.get(Profile, user_id)
+            if profile:
+                profile.photo_file_id = photo.file_id
+
+    # Boost
+
+    async def activate_boost(self, user_id: int, now: datetime) -> BoostHistory:
+        """Activate Boost for Premium user."""
+        from datetime import timedelta
+
+        async with self.db.sessions.begin() as session:
+            user = await session.get(User, user_id)
+            if not user:
+                raise RuleError("Пользователь не найден.")
+
+            if not has_premium(user, now):
+                raise RuleError("Boost доступен только с Premium.")
+
+            can_activate, error = await self._can_activate_boost_internal(session, user_id, now)
+            if not can_activate:
+                raise RuleError(error)
+
+            boost = BoostHistory(
+                user_id=user_id,
+                started_at=now,
+                ends_at=now + timedelta(minutes=BOOST_DURATION_MINUTES),
+                next_available_at=now + timedelta(hours=BOOST_COOLDOWN_HOURS),
+            )
+            session.add(boost)
+            await session.flush()
+            await session.refresh(boost)
+            return boost
+
+    async def _can_activate_boost_internal(
+        self, session: AsyncSession, user_id: int, now: datetime
+    ) -> tuple[bool, str]:
+        """Internal helper to check boost activation eligibility."""
+        last_boost = await session.scalar(
+            select(BoostHistory)
+            .where(BoostHistory.user_id == user_id)
+            .order_by(BoostHistory.id.desc())
+            .limit(1)
+        )
+
+        if last_boost and last_boost.next_available_at > now:
+            hours_left = (last_boost.next_available_at - now).total_seconds() / 3600
+            return (
+                False,
+                f"Boost можно активировать снова через {hours_left:.1f} ч.\n"
+                f"Следующая активация: {last_boost.next_available_at.strftime('%H:%M')} UTC.",
+            )
+
+        return True, ""
+
+    async def can_activate_boost(self, user_id: int, now: datetime) -> tuple[bool, str]:
+        """Check if user can activate Boost."""
+        async with self.db.sessions() as session:
+            user = await session.get(User, user_id)
+            if not user:
+                return False, "Пользователь не найден."
+
+            if not has_premium(user, now):
+                return False, "Boost доступен только с Premium."
+
+            return await self._can_activate_boost_internal(session, user_id, now)
+
+    async def current_boost(self, user_id: int, now: datetime) -> BoostHistory | None:
+        """Get current active Boost for user."""
+        async with self.db.sessions() as session:
+            return await session.scalar(
+                select(BoostHistory)
+                .where(
+                    BoostHistory.user_id == user_id,
+                    BoostHistory.started_at <= now,
+                    BoostHistory.ends_at > now,
+                )
+                .order_by(BoostHistory.id.desc())
+                .limit(1)
+            )
+
+    # Incoming likes with sorting
+
+    async def get_profile_with_photos(self, user_id: int) -> tuple[Profile | None, list[str]]:
+        """Get profile and list of photo file_ids for gallery navigation."""
+        async with self.db.sessions() as session:
+            profile = await session.get(Profile, user_id)
+            if not profile:
+                return None, []
+
+            photos = await session.scalars(
+                select(ProfilePhoto.file_id)
+                .where(ProfilePhoto.user_id == user_id)
+                .order_by(ProfilePhoto.position)
+            )
+            return profile, list(photos)
+
+    async def incoming_likes_list(
+        self, actor_id: int, sort_by: str = "time", page: int = 0
+    ) -> list[tuple[Profile, float | None]]:
+        """
+        Get incoming likes sorted by time (newest) or distance (nearest).
+        Returns list of (Profile, distance_km).
+        """
+        if sort_by not in {"time", "distance"}:
+            raise RuleError("Недопустимая сортировка.")
+
+        if not 0 <= page <= 1_000_000:
+            raise RuleError("Недопустимая страница.")
+
+        async with self.db.sessions() as session:
+            user = await self._actor(session, actor_id)
+
+            if not has_premium(user):
+                raise RuleError("Список входящих лайков доступен только с Premium.")
+
+            own = aliased(Profile)
+            has_locations = and_(
+                own.latitude.is_not(None),
+                own.longitude.is_not(None),
+                Profile.latitude.is_not(None),
+                Profile.longitude.is_not(None),
+            )
+            own_latitude = func.radians(own.latitude)
+            own_longitude = func.radians(own.longitude)
+            candidate_latitude = func.radians(Profile.latitude)
+            candidate_longitude = func.radians(Profile.longitude)
+            haversine = func.power(func.sin((candidate_latitude - own_latitude) / 2), 2) + (
+                func.cos(own_latitude)
+                * func.cos(candidate_latitude)
+                * func.power(func.sin((candidate_longitude - own_longitude) / 2), 2)
+            )
+            distance = case(
+                (
+                    has_locations,
+                    6_371.0088 * 2 * func.asin(func.least(1.0, func.sqrt(haversine))),
+                ),
+                else_=None,
+            ).label("distance_km")
+
+            query = (
+                select(Profile, distance, Reaction.created_at)
+                .join(User, User.id == Profile.user_id)
+                .join(own, own.user_id == actor_id)
+                .join(
+                    Reaction,
+                    and_(
+                        Reaction.from_user_id == Profile.user_id,
+                        Reaction.to_user_id == actor_id,
+                        Reaction.kind == "like",
+                    ),
+                )
+                .where(
+                    Profile.is_active.is_(True),
+                    User.is_banned.is_(False),
+                    User.username.is_not(None),
+                    ~exists().where(
+                        pair_clause(Block.blocker_id, Block.blocked_id, actor_id, Profile.user_id)
+                    ),
+                    ~exists().where(
+                        pair_clause(
+                            Match.user_low_id, Match.user_high_id, actor_id, Profile.user_id
+                        )
+                    ),
+                )
+            )
+
+            if sort_by == "time":
+                query = query.order_by(Reaction.created_at.desc())
+            else:  # distance
+                query = query.order_by(distance.is_(None), distance, Reaction.created_at.desc())
+
+            query = query.offset(page * 10).limit(10)
+
+            result = await session.execute(query)
+            rows = result.all()
+
+            return [
+                (profile, round(float(dist), 1) if dist is not None else None)
+                for profile, dist, _ in rows
+            ]

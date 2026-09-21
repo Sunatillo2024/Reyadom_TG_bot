@@ -1,20 +1,75 @@
+# Environment variables
 .env
 .env.*
 !.env.example
+
+# Python virtual environments
 .venv*/
+venv*/
+ENV*/
+env*/
+
+# Python bytecode and cache
 __pycache__/
 *.py[cod]
+*$py.class
+*.so
+.Python
+
+# Testing and coverage
 .pytest_cache/
-.ruff_cache/
 .coverage
+.coverage.*
 htmlcov/
+.tox/
+.nox/
+*.cover
+.hypothesis/
+
+# Linting and formatting
+.ruff_cache/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# IDEs and editors
 .idea/
+.vscode/
 .codex/
+.claude/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# AI assistant artifacts
+.aider*
+.claude/
+AGENTS.md
+
+# Database files
 data/*
 !data/.gitkeep
 *.db
 *.db-*
 *.sqlite*
-*.bak
 backups/
+
+# Logs
+*.log
+logs/
+
+# Build and distribution
 *.egg-info/
+dist/
+build/
+*.bak
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+achot.md

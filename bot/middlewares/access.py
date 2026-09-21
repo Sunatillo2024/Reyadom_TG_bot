@@ -57,6 +57,8 @@ class AccessMiddleware(BaseMiddleware):
                 "/id",
                 "/cancel",
                 "/delete",
+                "/terms",
+                "/paysupport",
                 "❓",
                 "❔",
                 "👤",
@@ -65,7 +67,8 @@ class AccessMiddleware(BaseMiddleware):
                 "home",
                 "home:cancel",
             }
-            if user.is_banned and command not in allowed:
+            payment_event = bool(message.successful_payment or message.refunded_payment)
+            if user.is_banned and command not in allowed and not payment_event:
                 raise RuleError("Твой доступ ограничен. Доступны /help, /privacy и /delete.")
             if callback and command.startswith("react:"):
                 now = time.monotonic()

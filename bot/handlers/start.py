@@ -57,7 +57,7 @@ async def cancel(event: Message | CallbackQuery, state: FSMContext) -> None:
 
 
 @router.message(Command("help"))
-@router.message(F.text.in_(texts.MENU_LABEL_ALIASES[5]))
+@router.message(F.text.in_(texts.MENU_LABEL_ALIASES[6]))
 async def help_message(message: Message) -> None:
     await message.answer(texts.HELP)
 

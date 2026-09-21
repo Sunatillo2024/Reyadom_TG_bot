@@ -21,13 +21,14 @@ from bot.services.validation import RuleError
 logger = logging.getLogger(__name__)
 
 
-def caption(profile: Profile) -> str:
+def caption(profile: Profile, show_badge: bool = False) -> str:
     # Visible text stays below the caption limit; escaping prevents HTML injection.
     distance = getattr(profile, "distance_km", None)
     location = f"📍 {distance:g} км от тебя" if distance is not None else "📍 Геолокация"
     if profile.latitude is None or profile.longitude is None:
         location = f"📍 {escape(profile.city)}"
-    parts = [f"<b>{escape(profile.name)}, {profile.age}</b>\n{location}"]
+    badge = " 💎" if show_badge else ""
+    parts = [f"<b>{escape(profile.name)}, {profile.age}</b>{badge}\n{location}"]
     if profile.bio:
         parts.append(escape(profile.bio))
     return "\n\n".join(parts)
@@ -58,7 +59,10 @@ async def notify_decision(
         return
     if result.match_id:
         keyboard = inline((("💜 Посмотреть анкету", f"match:{result.match_id}", "primary"),))
-        for recipient in (actor_telegram_id, result.recipient_telegram_id):
+        recipients = [actor_telegram_id]
+        if result.recipient_telegram_id is not None:
+            recipients.append(result.recipient_telegram_id)
+        for recipient in recipients:
             await safe_call(
                 store,
                 recipient,
@@ -71,6 +75,8 @@ async def notify_decision(
             )
     else:
         recipient = result.recipient_telegram_id
+        if recipient is None:
+            return
         await safe_call(
             store,
             recipient,

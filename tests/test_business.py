@@ -71,6 +71,7 @@ def test_ui_labels_callbacks_and_button_styles_are_serialized():
         [MENU_LABELS[1], MENU_LABELS[2]],
         [MENU_LABELS[3]],
         [MENU_LABELS[4], MENU_LABELS[5]],
+        [MENU_LABELS[6]],
     ]
     assert markup.input_field_placeholder == "Выбери действие 💜"
     serialized_menu = markup.model_dump(exclude_none=True)
@@ -89,6 +90,7 @@ def test_ui_labels_callbacks_and_button_styles_are_serialized():
     assert decision_data == [
         "react:42:like:d",
         "react:42:pass:d",
+        "undo:pass",
         "block:42",
         "report:42",
         "home",

@@ -35,6 +35,7 @@ def menu() -> ReplyKeyboardMarkup:
             [KeyboardButton(text=MENU_LABELS[1]), KeyboardButton(text=MENU_LABELS[2])],
             [KeyboardButton(text=MENU_LABELS[3])],
             [KeyboardButton(text=MENU_LABELS[4]), KeyboardButton(text=MENU_LABELS[5])],
+            [KeyboardButton(text=MENU_LABELS[6])],  # Помощь
         ],
         resize_keyboard=True,
         input_field_placeholder="Выбери действие 💜",
@@ -58,16 +59,41 @@ def home() -> InlineKeyboardMarkup:
     return inline((("⚙️ Настройки", "settings"), ("🏠 В меню", "home")))
 
 
-def decisions(target: int, incoming: bool = False) -> InlineKeyboardMarkup:
+def decisions(
+    target: int,
+    incoming: bool = False,
+    can_undo: bool = True,
+    photo_index: int = 0,
+    photo_count: int = 1,
+) -> InlineKeyboardMarkup:
     source = "i" if incoming else "d"
-    return inline(
+    rows: list[tuple[ButtonSpec, ...]] = []
+
+    # Photo gallery navigation if multiple photos
+    if photo_count > 1:
+        prev_idx = (photo_index - 1) % photo_count
+        next_idx = (photo_index + 1) % photo_count
+        rows.append(
+            (
+                ("◀️", f"photo:{target}:{prev_idx}:{source}"),
+                (f"{photo_index + 1}/{photo_count}", f"photo:info:{photo_index + 1}/{photo_count}"),
+                ("▶️", f"photo:{target}:{next_idx}:{source}"),
+            )
+        )
+
+    rows.append(
         (
             ("💜 Нравится", f"react:{target}:like:{source}"),
             ("Дальше ➡️", f"react:{target}:pass:{source}"),
         ),
+    )
+    if can_undo:
+        rows.append((("⏪ Вернуть анкету", "undo:pass"),))
+    rows.extend([
         (("🚫 Заблокировать", f"block:{target}"), ("⚠️ Пожаловаться", f"report:{target}")),
         (("🏠 В меню", "home"),),
-    )
+    ])
+    return inline(*rows)
 
 
 def profile_menu(active: bool) -> InlineKeyboardMarkup:
