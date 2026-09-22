@@ -1,8 +1,10 @@
 import asyncio
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock
 
 import pytest
+from aiogram import Bot
 from aiogram.exceptions import (
     TelegramBadRequest,
     TelegramForbiddenError,
@@ -220,10 +222,10 @@ async def test_like_match_idempotence_and_notifications(store, make_user):
     second = await store.decide(b.id, a.id, "like")
     assert second.created and second.match_id
     bot = SimpleNamespace(send_message=AsyncMock())
-    await notify_decision(bot, store, a.telegram_id, first, "like")
-    await notify_decision(bot, store, b.telegram_id, second, "like")
+    await notify_decision(cast(Bot, bot), store, a.telegram_id, first, "like")
+    await notify_decision(cast(Bot, bot), store, b.telegram_id, second, "like")
     repeated = await store.decide(b.id, a.id, "pass")
-    await notify_decision(bot, store, b.telegram_id, repeated, "pass")
+    await notify_decision(cast(Bot, bot), store, b.telegram_id, repeated, "pass")
     assert not repeated.created
     assert bot.send_message.await_count == 3  # one like, two match notifications
     assert await count_rows(store, Reaction) == 2
@@ -242,7 +244,7 @@ async def test_concurrent_reciprocal_likes(store, make_user):
     assert await count_rows(store, Match) == 1
     bot = SimpleNamespace(send_message=AsyncMock())
     for (actor, _), result in zip(requests, results, strict=True):
-        await notify_decision(bot, store, actor.telegram_id, result, "like")
+        await notify_decision(cast(Bot, bot), store, actor.telegram_id, result, "like")
     assert bot.send_message.await_count == 3
 
 
@@ -259,24 +261,26 @@ async def test_contact_authorization_current_username_and_hidden_matches(store, 
         )
     )
     with pytest.raises(RuleError):
-        await contact_url(bot, store, a.id, 999)
+        await contact_url(cast(Bot, bot), store, a.id, 999)
     bot.get_chat.assert_not_called()
     match_id = await make_match(store, a, b)
     with pytest.raises(RuleError):
-        await contact_url(bot, store, stranger.id, match_id)
+        await contact_url(cast(Bot, bot), store, stranger.id, match_id)
     bot.get_chat.assert_not_called()
     await store.set_active(a.id, False)
     await store.set_active(b.id, False)
-    assert await contact_url(bot, store, a.id, match_id) == "https://t.me/new_username"
+    assert await contact_url(cast(Bot, bot), store, a.id, match_id) == "https://t.me/new_username"
     bot.get_chat.assert_awaited_once_with(b.telegram_id)
     assert len(await store.match_page(a.id, 0)) == 1
     bot.get_chat.return_value.username = None
-    assert await contact_url(bot, store, a.id, match_id) is None
-    assert not (await store.profile(b.id)).is_active
+    assert await contact_url(cast(Bot, bot), store, a.id, match_id) is None
+    profile = await store.profile(b.id)
+    assert profile is not None
+    assert not profile.is_active
     bot.get_chat.side_effect = TelegramNetworkError(
         method=GetChat(chat_id=b.telegram_id), message="offline"
     )
-    assert await contact_url(bot, store, a.id, match_id) is None
+    assert await contact_url(cast(Bot, bot), store, a.id, match_id) is None
 
 
 @pytest.mark.parametrize("change", ["ban", "block", "delete"])
@@ -295,7 +299,7 @@ async def test_contact_rechecks_after_network_await(store, make_user, change):
 
     bot = SimpleNamespace(get_chat=AsyncMock(side_effect=racing_get_chat))
     with pytest.raises(RuleError):
-        await contact_url(bot, store, a.id, match_id)
+        await contact_url(cast(Bot, bot), store, a.id, match_id)
 
 
 async def test_report_deduplicates_blocks_and_survives_deletion(store, make_user):
@@ -381,7 +385,7 @@ async def test_failed_notification_preserves_match(store, make_user, error):
             raise failure
 
     bot = SimpleNamespace(send_message=AsyncMock(side_effect=send))
-    await notify_decision(bot, store, b.telegram_id, decision, "like")
+    await notify_decision(cast(Bot, bot), store, b.telegram_id, decision, "like")
     assert len(calls) == 2
     assert await count_rows(store, Match) == 1
     assert len(await store.match_page(a.id, 0)) == 1
@@ -396,7 +400,9 @@ async def test_restart_persists_profile_reaction_match(store, make_user):
     await store.db.close()
     reopened = Store(Database(url), [900_001])
     try:
-        assert (await reopened.profile(a.id)).name == "Ali"
+        profile = await reopened.profile(a.id)
+        assert profile is not None
+        assert profile.name == "Ali"
         assert len(await reopened.match_page(a.id, 0)) == 1
         assert (await reopened.match_target(a.id, match_id)).id == b.id
         assert not (await reopened.decide(a.id, b.id, "like")).created

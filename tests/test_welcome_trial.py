@@ -38,6 +38,7 @@ async def test_new_user_gets_exactly_one_trial_and_restart_does_not_extend(store
     assert first.user.trial_used
     assert recreated.user.trial_started_at == started_at
     assert recreated.user.trial_ends_at == started_at + timedelta(days=7)
+    assert recreated.user.trial_ends_at is not None
     assert recreated.user.trial_ends_at.utcoffset() == timedelta(0)
     async with store.db.sessions() as session:
         assert await session.scalar(

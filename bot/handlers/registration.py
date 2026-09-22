@@ -82,7 +82,7 @@ async def age(message: Message, state: FSMContext) -> None:
 
 @router.callback_query(Registration.gender, F.data.startswith("reg:gender:"))
 async def gender(callback: CallbackQuery, state: FSMContext) -> None:
-    if callback.data is None:
+    if callback.data is None or not isinstance(callback.message, Message):
         return
     value = callback.data.rsplit(":", 1)[-1]
     if value not in {"male", "female"}:
@@ -176,6 +176,8 @@ async def photo(message: Message, state: FSMContext) -> None:
 async def save(callback: CallbackQuery, state: FSMContext, store: Store, user: User) -> None:
     await store.save_profile(user.id, await state.get_data())
     await state.clear()
+    if not isinstance(callback.message, Message):
+        return
     await callback.message.answer(
         "<b>Готово! Анкета создана 💜</b>\n"
         "Поиск настроен на возраст 18–99 лет. Анкеты будут показаны от ближайших "

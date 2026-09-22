@@ -1,6 +1,5 @@
 import logging
 import time
-import traceback
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -120,14 +119,8 @@ class AccessMiddleware(BaseMiddleware):
                 telegram_id,
                 lambda: data["bot"].send_message(telegram_id, texts.TEMPORARY_ERROR),
             )
-        except Exception as exc:
-            # Exception strings may contain tokens/profile text. Log type and frames only.
-            frames = traceback.extract_tb(exc.__traceback__)
-            logger.error(
-                "Непредвиденная ошибка: %s; расположение=%s",
-                type(exc).__name__,
-                [(frame.filename, frame.lineno, frame.name) for frame in frames],
-            )
+        except Exception:
+            logger.exception("Непредвиденная ошибка при обработке обновления")
             await safe_call(
                 self.store,
                 telegram_id,

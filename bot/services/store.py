@@ -235,41 +235,53 @@ class Store:
         async with self.db.sessions() as session:
             return await session.get(Profile, actor)
 
-    async def save_profile(self, actor: int, draft: dict[str, Any]) -> None:
-        if "latitude" in draft and "longitude" in draft:
-            latitude, longitude = coordinates(draft["latitude"], draft["longitude"])
-            city = "Геолокация"
-        else:
-            latitude, longitude = None, None
-            city = clean_text(draft["city"], 2, 60)
-        values = {
-            "name": clean_text(draft["name"], 2, 40),
-            "age": age_value(draft["age"]),
-            "gender": draft["gender"],
-            "seeking": draft["seeking"],
-            "city": city,
-            "bio": clean_text(draft["bio"], 0, 300),
-            "photo_file_id": draft["photo_file_id"],
-            "latitude": latitude,
-            "longitude": longitude,
-        }
-        if values["gender"] not in {"male", "female"} or values["seeking"] not in {
-            "male",
-            "female",
-            "any",
-        }:
-            raise RuleError("Выбери пол с помощью кнопки.")
-        if not values["photo_file_id"] or not isinstance(draft.get("consent_at"), datetime):
-            raise RuleError("Нужны фото и твоё согласие. Начни заново с /start.")
-        values["city_normalized"] = normalize_city(values["city"])
+    async def save_profile(self, actor: int, draft: dict[str, Any]) -> bool:
+        """Atomically create a profile; return False when the same save was already applied."""
         async with self.db.sessions.begin() as session:
-            user = await self._actor(session, actor)
+            # Serialize saves per user so duplicate Telegram updates cannot both insert a profile.
+            user = await session.scalar(select(User).where(User.id == actor).with_for_update())
+            if not user or user.is_banned:
+                raise RuleError("Доступ ограничен. Доступны /help, /privacy и /delete.")
             if not user.username:
                 raise RuleError("Добавь имя пользователя в настройках Telegram.")
             if await session.get(Profile, actor):
-                raise RuleError("Анкета уже существует. Измени её в разделе «Моя анкета».")
+                return False
+
+            try:
+                if "latitude" in draft or "longitude" in draft:
+                    latitude, longitude = coordinates(
+                        draft.get("latitude"), draft.get("longitude")
+                    )
+                    city = "Геолокация"
+                else:
+                    latitude, longitude = None, None
+                    city = clean_text(draft["city"], 2, 60)
+                values = {
+                    "name": clean_text(draft["name"], 2, 40),
+                    "age": age_value(draft["age"]),
+                    "gender": draft["gender"],
+                    "seeking": draft["seeking"],
+                    "city": city,
+                    "bio": clean_text(draft["bio"], 0, 300),
+                    "photo_file_id": draft["photo_file_id"],
+                    "latitude": latitude,
+                    "longitude": longitude,
+                }
+            except KeyError as exc:
+                raise RuleError("Данные анкеты устарели. Начни заново с /start.") from exc
+            if values["gender"] not in {"male", "female"} or values["seeking"] not in {
+                "male",
+                "female",
+                "any",
+            }:
+                raise RuleError("Выбери пол с помощью кнопки.")
+            if not values["photo_file_id"] or not isinstance(draft.get("consent_at"), datetime):
+                raise RuleError("Нужны фото и твоё согласие. Начни заново с /start.")
+            values["city_normalized"] = normalize_city(values["city"])
+
+            # Old releases could leave gallery rows behind after deleting a profile.
+            await session.execute(delete(ProfilePhoto).where(ProfilePhoto.user_id == actor))
             session.add(Profile(user_id=actor, consent_at=draft["consent_at"], **values))
-            # Migrate first photo to ProfilePhoto table
             session.add(
                 ProfilePhoto(
                     user_id=actor,
@@ -279,6 +291,8 @@ class Store:
                     created_at=draft["consent_at"],
                 )
             )
+            await session.flush()
+            return True
 
     async def edit_profile(self, actor: int, field: str, value: Any) -> None:
         if field in {"name", "city", "bio"}:
