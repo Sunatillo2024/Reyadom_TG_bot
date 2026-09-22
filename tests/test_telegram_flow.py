@@ -8,6 +8,7 @@ import pytest
 from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramBadRequest
+from aiogram.fsm.storage.memory import MemoryStorage, SimpleEventIsolation
 from aiogram.methods import AnswerCallbackQuery, GetChat, SendMessage, SendPhoto
 from aiogram.types import (
     AcceptedGiftTypes,
@@ -41,7 +42,7 @@ from bot.texts import LEGACY_MENU_LABELS, MENU_LABELS, PREVIOUS_MENU_LABELS
 
 async def test_full_dispatcher_flow_offline(store, make_user, monkeypatch):
     """Real aiogram routing/FSM/middleware with a mocked HTTP session."""
-    dispatcher = create_dispatcher(store)
+    dispatcher = create_dispatcher(store, MemoryStorage(), SimpleEventIsolation())
     bot = Bot("123456:OFFLINE_TEST_TOKEN", default=DefaultBotProperties(parse_mode="HTML"))
     calls = []
     sequence = count(1)

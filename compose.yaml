@@ -21,9 +21,28 @@ services:
       - .env
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:1212@postgres:5432/ryadom_bot
+      REDIS_URL: redis://redis:6379/0
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    # Development only: reachable from this host, never from the public network.
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 volumes:
   ryadom-postgres-data:
+  redis_data:

@@ -44,6 +44,14 @@ async def test_profile_save_is_idempotent(store):
     assert await row_count(store, ProfilePhoto) == 1
 
 
+async def test_profile_save_accepts_json_serialized_consent_timestamp(store):
+    user = await store.sync_user(810_010, "redis_draft")
+    draft = profile_draft(consent_at=datetime.now(UTC).isoformat())
+
+    assert await store.save_profile(user.id, draft)
+    assert (await store.profile(user.id)).consent_at.tzinfo is not None
+
+
 async def test_profile_save_replaces_legacy_orphan_photo(store):
     user = await store.sync_user(810_002, "orphan_photo")
     async with store.db.sessions.begin() as session:

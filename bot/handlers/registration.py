@@ -40,7 +40,8 @@ async def adult(callback: CallbackQuery, state: FSMContext) -> None:
 async def consent(callback: CallbackQuery, state: FSMContext, user: User) -> None:
     if not isinstance(callback.message, Message):
         return
-    await state.update_data(consent_at=utcnow())
+    # Redis FSM storage is JSON-backed, so drafts must only contain JSON values.
+    await state.update_data(consent_at=utcnow().isoformat())
     if user.username:
         await request_name(callback.message, state)
     else:

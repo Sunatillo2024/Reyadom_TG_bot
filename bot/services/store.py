@@ -275,20 +275,30 @@ class Store:
                 "any",
             }:
                 raise RuleError("Выбери пол с помощью кнопки.")
-            if not values["photo_file_id"] or not isinstance(draft.get("consent_at"), datetime):
+            consent_at = draft.get("consent_at")
+            if isinstance(consent_at, str):
+                try:
+                    consent_at = datetime.fromisoformat(consent_at)
+                except ValueError:
+                    consent_at = None
+            if (
+                not values["photo_file_id"]
+                or not isinstance(consent_at, datetime)
+                or consent_at.tzinfo is None
+            ):
                 raise RuleError("Нужны фото и твоё согласие. Начни заново с /start.")
             values["city_normalized"] = normalize_city(values["city"])
 
             # Old releases could leave gallery rows behind after deleting a profile.
             await session.execute(delete(ProfilePhoto).where(ProfilePhoto.user_id == actor))
-            session.add(Profile(user_id=actor, consent_at=draft["consent_at"], **values))
+            session.add(Profile(user_id=actor, consent_at=consent_at, **values))
             session.add(
                 ProfilePhoto(
                     user_id=actor,
                     file_id=values["photo_file_id"],
                     is_primary=True,
                     position=0,
-                    created_at=draft["consent_at"],
+                    created_at=consent_at,
                 )
             )
             await session.flush()

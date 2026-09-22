@@ -2,7 +2,7 @@
 
 18+ kichik auditoriya uchun mustaqil MVP: anketa → like/pass → o'zaro match → Telegram shaxsiy chatidagi suhbat. Bot matnlari o'zbekcha, lotin yozuvida. Boshqa botdan foydalanuvchi, anketa yoki rasmlar ko'chirilmaydi.
 
-Python 3.11 (tekshirilgan versiya: 3.11.9), aiogram 3, SQLAlchemy asyncio, PostgreSQL/asyncpg, Alembic va pydantic-settings ishlatiladi. Bot bitta processda long polling orqali ishlaydi. FastAPI, frontend, Redis, to'lov yoki bot ichidagi anonim chat yo'q.
+Python 3.11 (tekshirilgan versiya: 3.11.9), aiogram 3, SQLAlchemy asyncio, PostgreSQL/asyncpg, Alembic, Redis va pydantic-settings ishlatiladi. Bot bitta processda long polling orqali ishlaydi. FastAPI, frontend yoki bot ichidagi anonim chat yo'q.
 
 ## Lokal ishga tushirish
 
@@ -29,13 +29,16 @@ cp -n .env.example .env
 BOT_TOKEN=
 ADMIN_IDS=[]
 DATABASE_URL=postgresql+asyncpg://postgres:1212@localhost:5432/ryadom_bot
+REDIS_URL=redis://localhost:6379/0
+FSM_STATE_TTL=86400
+FSM_DATA_TTL=86400
 LOG_LEVEL=INFO
 ```
 
 PostgreSQL lokal o'rnatilgan bo'lsa, `ryadom_bot` bazasini yarating. Docker bilan tez variant:
 
 ```sh
-docker compose up -d postgres
+docker compose up -d postgres redis
 docker compose ps
 ```
 
@@ -51,6 +54,42 @@ python -m bot.main
 ```
 
 To'xtatish: `Ctrl+C`. Bo'sh yoki noto'g'ri token bot startup'ida tushunarli xabar beradi. Migratsiya va testlar Telegram tokenini talab qilmaydi. Baza startup'da avtomatik yaratilmaydi: sxemani Alembic orqali tayyorlang.
+
+## Redis: FSM va vaqtinchalik ma'lumotlar
+
+Redis Aiogram 3.22'ning rasmiy `RedisStorage`i orqali faqat FSM state'i, anketa to'ldirish drafti, tasdiqlash va qisqa update locklari uchun ishlatiladi. Redis'da profil, like/pass, match, premium muddati, Stars to'lovlari, block, report yoki audit yozuvlari saqlanmaydi — ular PostgreSQL'da qoladi. Hozir alohida cache yoki Redis rate limit qo'shilmagan; mavjud like takrorini PostgreSQL tranzaksiyasi himoya qiladi.
+
+`REDIS_URL` development uchun xavfsiz defaultga ega: `redis://localhost:6379/0`. `FSM_STATE_TTL` va `FSM_DATA_TTL` sekundlarda, default `86400` (24 soat); ular musbat integer bo'lishi kerak. Har startup'da bot Redis'ga `PING` yuboradi. Redis ishlamasa bot pollingni boshlamaydi, ammo URL yoki undagi parol logga chiqmaydi.
+
+```dotenv
+# Bot macOS'da, Redis Docker'da ishlasa
+REDIS_URL=redis://localhost:6379/0
+
+# Bot va Redis ikkalasi Docker Compose ichida ishlasa
+REDIS_URL=redis://redis:6379/0
+```
+
+Compose'dagi `bot` service ikkinchi qiymatni o'zi oladi. `redis` development uchun faqat `127.0.0.1:6379`ga bog'langan; production'da 6379'ni hech qachon `0.0.0.0` yoki ochiq internetga publish qilmang. Redis AOF va `redis_data` named volume bilan saqlanadi.
+
+Anketa PostgreSQL tranzaksiyasida muvaffaqiyatli yozilgandan keyingina `state.clear()` qilinadi. Yozish xato bo'lsa draft Redis'da TTL tugaguncha qoladi, shuning uchun foydalanuvchi ma'lumotini qayta kiritmaydi. TTL tugashi yoki `/cancel`/menyuga o'tish draftni tozalaydi.
+
+Redis holatini tekshirish:
+
+```sh
+docker compose up -d redis
+docker compose ps
+docker compose exec redis redis-cli ping
+docker compose logs redis
+```
+
+Xavfsiz restartda named volume'larni o'chirmang:
+
+```sh
+docker compose restart redis
+docker compose restart bot
+```
+
+`docker compose down -v` ishlatmang: u PostgreSQL va Redis named volume'larini ham o'chiradi. Redis qayta ishga tushgach bot `PING`dan o'tib ishga tushadi; tayyor profil va boshqa biznes ma'lumotlari Redis'dan mustaqil ravishda PostgreSQL'da qoladi.
 
 **Bir token bilan faqat bitta polling processi ishlasin.** Lokal terminal, PyCharm va VPS'da bir xil tokenni bir paytda ishga tushirmang. Conflict bo'lsa, ortiqcha processni to'xtating; boshqa ishlayotgan servis avtomatik to'xtatilmaydi. Bu talab [aiogram long polling hujjatida](https://docs.aiogram.dev/en/latest/dispatcher/long_polling.html) ham qayd etilgan.
 
@@ -111,7 +150,7 @@ Kichik auditoriya uchun polling update'lari ketma-ket qayta ishlanadi; Telegramn
 
 Bildirishnoma «aynan bir marta yetishi» kafolatlanmaydi: commit va yuborish orasida process to'xtashi yoki tarmoq uzilishi mumkin. Alohida outbox/ish navbati yo'q. Saqlangan like va matchlar menyudan ochiladi. Takroriy tugma yangi reaction/match yoki odatiy takroriy bildirishnoma yaratmaydi.
 
-**MemoryStorage faqat tugallanmagan forma uchun. Restartda forma, tasdiq bosqichi va cooldown yo'qoladi.** Saqlangan anketa buzilmaydi; `/start` qayta ro'yxatdan o'tishga majburlamaydi. Bu [aiogram MemoryStorage xususiyati](https://docs.aiogram.dev/en/v3.22.0/dispatcher/finite_state_machine/storages.html) va ushbu MVP'ning ongli soddalashtirishidir.
+**Redis FSM storage tugallanmagan forma va tasdiqlash bosqichini TTL tugamaguncha restartdan keyin ham saqlaydi.** Saqlangan anketa buzilmaydi; `/start` qayta ro'yxatdan o'tishga majburlamaydi. Taxminan bir soniyalik like tugmasi cooldown'i hanuz process xotirasida, ammo takroriy reaction/matchning o'zi PostgreSQL cheklovlari bilan himoyalangan.
 
 Token va profil matnlari logga yozilmaydi; kutilmagan xatolarda exception turi va kod joylari yoziladi. `.env`, `.venv*`, eski SQLite DB/WAL/SHM fayllari va backuplar `.gitignore` orqali chiqarilgan.
 
@@ -120,14 +159,16 @@ Token va profil matnlari logga yozilmaydi; kutilmagan xatolarda exception turi v
 ```sh
 python -m pip install -r requirements-dev.txt
 docker compose exec -T postgres createdb -U postgres ryadom_bot_test
-TEST_DATABASE_URL=postgresql+asyncpg://postgres:1212@localhost:55432/ryadom_bot_test pytest
+docker compose up -d redis
+TEST_DATABASE_URL=postgresql+asyncpg://postgres:1212@localhost:55432/ryadom_bot_test \
+TEST_REDIS_URL=redis://localhost:6379/15 pytest
 ruff check .
 DATABASE_URL=postgresql+asyncpg://postgres:1212@localhost:55432/ryadom_bot alembic check
 ```
 
-Ruff faqat dev dependency. Versiyalar requirements fayllarida aniq qayd etilgan. Integratsion testlar xavfsizlik uchun nomi `_test` bilan tugaydigan alohida PostgreSQL bazasini va `TEST_DATABASE_URL`ni talab qiladi; sxema testlar davomida tozalanadi. Haqiqiy Telegram API chaqiruvlari mock qilinadi.
+Ruff faqat dev dependency. Versiyalar requirements fayllarida aniq qayd etilgan. Integratsion testlar xavfsizlik uchun nomi `_test` bilan tugaydigan alohida PostgreSQL bazasini va `TEST_DATABASE_URL`ni talab qiladi; sxema testlar davomida tozalanadi. Redis FSM testlari tasodifiy `test:fsm:*` prefixdan foydalanadi va faqat shu test kalitlarini o'chiradi; Redis topilmasa ular skip qilinib, aniq xabar beradi. Haqiqiy Telegram API chaqiruvlari mock qilinadi.
 
-Testlar: yosh va kontakt validatsiyasi, tasdiqlanmagan profil, ikki tomon filtrlari, yashirish/ban/block/pass, takroriy va bir vaqtdagi likelar, kontakt ruxsati va joriy username, API kutishidagi ban/block/delete, notification xatolari, o'chirish va moderatsiya yozuvlari, restartdan keyingi saqlanish, toza migratsiya, bo'sh token hamda haqiqiy aiogram router/FSM orqali ro'yxatdan o'tishdan kontaktgacha bo'lgan offline oqim.
+Testlar: yosh va kontakt validatsiyasi, tasdiqlanmagan profil, ikki tomon filtrlari, yashirish/ban/block/pass, takroriy va bir vaqtdagi likelar, kontakt ruxsati va joriy username, API kutishidagi ban/block/delete, notification xatolari, o'chirish va moderatsiya yozuvlari, restartdan keyingi saqlanish, toza migratsiya, bo'sh token hamda haqiqiy aiogram router/FSM orqali ro'yxatdan o'tishdan kontaktgacha bo'lgan offline oqim. Redis testlari PING, per-user FSM izolyatsiyasi, keyingi update'da data olish, storage qayta yaratilgandagi davomiylik, `state.clear()`, TTL o'chishi va secret'siz ulanish xatosi logini qamrab oladi.
 
 Haqiqiy token bilan qo'lda 2–3 test akkauntida tekshiring:
 
@@ -148,10 +189,13 @@ Railway project ichida ikkita alohida service yarating: bot repository service v
 BOT_TOKEN=<BotFather tokeni>
 ADMIN_IDS=[123456789]
 DATABASE_URL=${{Postgres.DATABASE_URL}}
+REDIS_URL=<faqat-private Redis URL>
+FSM_STATE_TTL=86400
+FSM_DATA_TTL=86400
 LOG_LEVEL=INFO
 ```
 
-`Postgres` — PostgreSQL service nomi; boshqa nom tanlangan bo'lsa reference nomini ham moslang. Railway'ning oddiy `postgresql://...` qiymati avtomatik asyncpg URL'ga aylantiriladi. Maxfiy qiymatlarni repository yoki Docker image ichiga yozmang.
+`Postgres` — PostgreSQL service nomi; boshqa nom tanlangan bo'lsa reference nomini ham moslang. Redis service'ni private networkda yarating va uning private URL'ini `REDIS_URL`ga kiriting; 6379 uchun public endpoint yaratmang. Railway'ning oddiy `postgresql://...` qiymati avtomatik asyncpg URL'ga aylantiriladi. Maxfiy qiymatlarni repository yoki Docker image ichiga yozmang.
 
 - Pre-deploy Command: `alembic upgrade head`
 - Start Command: `python -m bot.main`
@@ -203,6 +247,6 @@ Production PostgreSQL uchun Railway backup siyosati yoki odatiy `pg_dump`/`pg_re
 
 ## Asosiy fayllar va manbalar
 
-`bot/main.py` — polling va shutdown; `bot/config.py` — `.env`; `bot/db/` — schema/ulanish; `bot/services/` — tranzaksiyalar, qidiruv, moderatsiya, Telegram xatolari; `bot/handlers/` — foydalanuvchi/admin oqimlari; `bot/keyboards/`, `bot/states.py`, `bot/texts.py` — interfeys; `bot/middlewares/` — private-chat, ban, username va cooldown; `alembic/` — migratsiyalar; `tests/` — offline tekshiruvlar; `deploy/` — xizmat namunasi.
+`bot/main.py` — polling, Redis startup PING va shutdown; `bot/config.py` — `.env`; `bot/db/` — schema/ulanish; `bot/services/` — tranzaksiyalar, qidiruv, moderatsiya, Telegram xatolari; `bot/handlers/` — foydalanuvchi/admin oqimlari; `bot/keyboards/`, `bot/states.py`, `bot/texts.py` — interfeys; `bot/middlewares/` — private-chat, ban, username va cooldown; `alembic/` — migratsiyalar; `tests/` — offline tekshiruvlar; `deploy/` — xizmat namunasi.
 
 Texnik qarorlar uchun rasmiy manbalar: [SQLAlchemy asyncpg](https://docs.sqlalchemy.org/en/20/dialects/postgresql.html#module-sqlalchemy.dialects.postgresql.asyncpg), [Pydantic Settings](https://docs.pydantic.dev/latest/concepts/pydantic_settings/), [Railway PostgreSQL](https://docs.railway.com/guides/postgresql), [Telegram Bot API](https://core.telegram.org/bots/api). Biznes qoidalari ushbu loyiha talablari asosida yozilgan.

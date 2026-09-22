@@ -1,4 +1,5 @@
 from typing import Literal
+from urllib.parse import urlparse
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -19,12 +20,24 @@ def normalize_database_url(value: str) -> str:
     )
 
 
+def normalize_redis_url(value: str) -> str:
+    """Validate a Redis URL without ever logging its credentials."""
+    value = value.strip()
+    parsed = urlparse(value)
+    if parsed.scheme not in {"redis", "rediss"} or not parsed.hostname:
+        raise ValueError("REDIS_URL должен быть URL вида redis://host:6379/0")
+    return value
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     bot_token: SecretStr = SecretStr("")
     admin_ids: list[int] = Field(default_factory=list)
     database_url: str
+    redis_url: str = "redis://localhost:6379/0"
+    fsm_state_ttl: int = Field(default=86_400, ge=1)
+    fsm_data_ttl: int = Field(default=86_400, ge=1)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     stars_sales_enabled: bool = True
     welcome_trial_enabled: bool = True
@@ -34,6 +47,11 @@ class Settings(BaseSettings):
     @classmethod
     def postgresql_async_url(cls, value: str) -> str:
         return normalize_database_url(value)
+
+    @field_validator("redis_url")
+    @classmethod
+    def redis_connection_url(cls, value: str) -> str:
+        return normalize_redis_url(value)
 
     @field_validator("admin_ids")
     @classmethod

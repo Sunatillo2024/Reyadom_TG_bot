@@ -14,7 +14,8 @@ from aiogram.exceptions import (
     TelegramServerError,
     TelegramUnauthorizedError,
 )
-from aiogram.fsm.storage.memory import MemoryStorage, SimpleEventIsolation
+from aiogram.fsm.storage.base import BaseEventIsolation, BaseStorage, DefaultKeyBuilder
+from aiogram.fsm.storage.redis import RedisEventIsolation, RedisStorage
 from aiogram.methods import GetUpdates
 from aiogram.types import BotCommand, CallbackQuery, ChatMemberUpdated, ErrorEvent, Message, Update
 from aiogram.utils.backoff import BackoffConfig
@@ -22,6 +23,7 @@ from aiogram.utils.token import TokenValidationError, validate_token
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from pydantic import ValidationError
+from redis.exceptions import RedisError
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -102,8 +104,37 @@ class PollingDispatcher(Dispatcher):
                 request.offset = update.update_id + 1
 
 
-def create_dispatcher(store: Store) -> Dispatcher:
-    dispatcher = PollingDispatcher(storage=MemoryStorage(), events_isolation=SimpleEventIsolation())
+def create_redis_storage(settings: Settings) -> RedisStorage:
+    """Create the single Redis client used for FSM data and update locks."""
+    return RedisStorage.from_url(
+        settings.redis_url,
+        key_builder=DefaultKeyBuilder(prefix="fsm", with_bot_id=True),
+        state_ttl=settings.fsm_state_ttl,
+        data_ttl=settings.fsm_data_ttl,
+    )
+
+
+async def verify_redis_connection(storage: RedisStorage) -> bool:
+    """Ping Redis before accepting updates without exposing connection secrets."""
+    try:
+        if await storage.redis.ping():
+            logger.info("Redis FSM storage ulandi")
+            return True
+    except RedisError as exc:
+        logger.error(
+            "Redis ulanib bo'lmadi; bot ishga tushmaydi. "
+            "REDIS_URL va Redis servisni tekshiring (%s).",
+            type(exc).__name__,
+        )
+        return False
+    logger.error("Redis PING kutilgan PONG javobini bermadi; bot ishga tushmaydi")
+    return False
+
+
+def create_dispatcher(
+    store: Store, storage: BaseStorage, events_isolation: BaseEventIsolation
+) -> Dispatcher:
+    dispatcher = PollingDispatcher(storage=storage, events_isolation=events_isolation)
     dispatcher["store"] = store
     access = AccessMiddleware(store)
     dispatcher.message.outer_middleware(access)
@@ -167,7 +198,12 @@ async def run(settings: Settings) -> int:
         welcome_trial_days=settings.welcome_trial_days,
     )
     bot = Bot(token, default=DefaultBotProperties(parse_mode="HTML"))
-    dispatcher = create_dispatcher(store)
+    storage = create_redis_storage(settings)
+    dispatcher = create_dispatcher(
+        store,
+        storage,
+        RedisEventIsolation(redis=storage.redis, key_builder=storage.key_builder),
+    )
     notification_task: asyncio.Task[None] | None = None
     try:
         try:
@@ -177,6 +213,8 @@ async def run(settings: Settings) -> int:
                     raise RuntimeError("migration")
         except (SQLAlchemyError, RuntimeError):
             print("База данных не готова. Сначала выполните alembic upgrade head.", file=sys.stderr)
+            return 2
+        if not await verify_redis_connection(storage):
             return 2
         await bot.set_my_commands(
             [
