@@ -1,4 +1,4 @@
-from typing import Literal, TypeAlias
+from typing import Any, Literal, TypeAlias, cast
 
 from aiogram.types import (
     InlineKeyboardButton,
@@ -21,7 +21,13 @@ def inline(*rows: tuple[ButtonSpec, ...]) -> InlineKeyboardMarkup:
         for item in row:
             label, data, *optional_style = item
             extra = {"style": optional_style[0]} if optional_style else {}
-            buttons.append(InlineKeyboardButton(text=label, callback_data=data, **extra))
+            buttons.append(
+                InlineKeyboardButton(
+                    text=label,
+                    callback_data=data,
+                    **cast(Any, extra),
+                )
+            )
         keyboard.append(buttons)
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
