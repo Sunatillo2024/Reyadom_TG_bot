@@ -31,11 +31,27 @@ class User(Base):
     username: Mapped[str | None] = mapped_column(String(64))
     is_banned: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
     premium_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    trial_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    trial_ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    trial_used: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    trial_welcome_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    trial_reminder_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    trial_expired_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     show_premium_badge: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default=text("true")
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    __table_args__ = (CheckConstraint("telegram_id > 0", name="ck_user_telegram_id"),)
+    __table_args__ = (
+        CheckConstraint("telegram_id > 0", name="ck_user_telegram_id"),
+        CheckConstraint(
+            "trial_started_at IS NULL OR trial_ends_at > trial_started_at",
+            name="ck_user_trial_period",
+        ),
+        CheckConstraint(
+            "trial_used OR (trial_started_at IS NULL AND trial_ends_at IS NULL)",
+            name="ck_user_trial_requires_used",
+        ),
+    )
 
 
 class Profile(Base):

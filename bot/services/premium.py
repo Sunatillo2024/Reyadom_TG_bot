@@ -34,34 +34,55 @@ class PremiumStatus:
     is_premium: bool
     until: datetime | None
     days_left: int
+    kind: Literal["trial", "paid"] | None
+
+
+def get_effective_premium_until(user: User) -> datetime | None:
+    """Return the later of the welcome-trial and paid Premium end timestamps."""
+    candidates = [value for value in (user.trial_ends_at, user.premium_until) if value]
+    return max(candidates, default=None)
 
 
 def has_premium(user: User, now: datetime | None = None) -> bool:
     """Check if user has active Premium. Single source of truth."""
     if now is None:
         now = datetime.now(UTC)
-    if user.premium_until is None:
-        return False
-    return user.premium_until > now
+    effective_until = get_effective_premium_until(user)
+    return effective_until is not None and effective_until > now
 
 
 def premium_status(user: User, now: datetime | None = None) -> PremiumStatus:
     """Return Premium status with expiry details."""
     if now is None:
         now = datetime.now(UTC)
-    is_active = has_premium(user, now)
+    effective_until = get_effective_premium_until(user)
+    is_active = effective_until is not None and effective_until > now
     days = 0
-    if is_active and user.premium_until:
-        delta = user.premium_until - now
+    if is_active and effective_until:
+        delta = effective_until - now
         days = max(0, delta.days)
-    return PremiumStatus(is_premium=is_active, until=user.premium_until, days_left=days)
+    kind: Literal["trial", "paid"] | None = None
+    if user.premium_until is not None and user.premium_until == effective_until and is_active:
+        kind = "paid"
+    elif user.trial_ends_at is not None and user.trial_ends_at == effective_until and is_active:
+        kind = "trial"
+    return PremiumStatus(
+        is_premium=is_active,
+        until=effective_until,
+        days_left=days,
+        kind=kind,
+    )
 
 
 def calculate_premium_end(
-    current_until: datetime | None, plan_code: PlanCode, now: datetime | None = None
+    current_until: datetime | None,
+    plan_code: PlanCode,
+    now: datetime | None = None,
+    *,
+    trial_until: datetime | None = None,
 ) -> datetime:
     """
-    Calculate new Premium end date. Adds duration to max(now, current_until).
+    Calculate a paid Premium end date from max(now, paid end, trial end).
 
     Month means calendar month: 31 Jan + 1 month = 28/29 Feb (preserving time).
     If target day does not exist, use last day of that month.
@@ -69,7 +90,7 @@ def calculate_premium_end(
     if now is None:
         now = datetime.now(UTC)
 
-    base = max(now, current_until) if current_until else now
+    base = max(value for value in (now, current_until, trial_until) if value is not None)
     plan = PREMIUM_PLANS[plan_code]
 
     if "duration_days" in plan:

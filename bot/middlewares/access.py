@@ -19,6 +19,7 @@ from bot.keyboards.common import inline
 from bot.services.store import Store
 from bot.services.telegram import safe_call
 from bot.services.validation import RuleError
+from bot.services.welcome_trial import deliver_trial_notifications
 
 logger = logging.getLogger(__name__)
 
@@ -47,8 +48,12 @@ class AccessMiddleware(BaseMiddleware):
         if message.chat.id != telegram_id:
             return None
         try:
-            user = await self.store.sync_user(telegram_id, event.from_user.username)
+            sync_result = await self.store.sync_user_with_status(
+                telegram_id, event.from_user.username
+            )
+            user = sync_result.user
             data.update(store=self.store, user=user)
+            await deliver_trial_notifications(data["bot"], self.store, user_id=user.id)
             command = (event.data or "") if callback else (event.text or "").split(" ")[0]
             allowed = {
                 "/start",

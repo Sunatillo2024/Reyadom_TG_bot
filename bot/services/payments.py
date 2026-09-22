@@ -74,12 +74,17 @@ class PaymentService:
         self.store = store
 
     async def create_or_reuse_order(
-        self, user_id: int, telegram_id: int, plan_code: str
+        self,
+        user_id: int,
+        telegram_id: int,
+        plan_code: str,
+        *,
+        now: datetime | None = None,
     ) -> PremiumOrder:
         if not self.store.stars_sales_enabled:
             raise RuleError("Новые покупки Premium временно приостановлены.")
         duration_value, duration_unit = plan_duration(plan_code)
-        now = datetime.now(UTC)
+        now = now or datetime.now(UTC)
         async with self.store.db.sessions.begin() as session:
             user = await session.scalar(select(User).where(User.id == user_id).with_for_update())
             if not user or user.telegram_id != telegram_id or user.is_banned:
@@ -195,9 +200,11 @@ class PaymentService:
             order.last_error = None
             return True, None
 
-    async def complete_payment(self, payment: PaymentInput) -> PaymentResult:
+    async def complete_payment(
+        self, payment: PaymentInput, *, now: datetime | None = None
+    ) -> PaymentResult:
         order_id = payload_order_id(payment.invoice_payload)
-        now = datetime.now(UTC)
+        now = now or datetime.now(UTC)
         async with self.store.db.sessions.begin() as session:
             existing = await session.scalar(
                 select(PremiumPayment)

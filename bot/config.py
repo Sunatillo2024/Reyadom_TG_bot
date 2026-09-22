@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     database_url: str
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     stars_sales_enabled: bool = True
+    welcome_trial_enabled: bool = True
+    welcome_trial_days: int = Field(default=7, ge=1, le=365)
 
     @field_validator("database_url")
     @classmethod

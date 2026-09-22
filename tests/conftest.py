@@ -25,7 +25,9 @@ async def store():
     async with db.engine.begin() as connection:
         await connection.run_sync(Base.metadata.drop_all)
         await connection.run_sync(Base.metadata.create_all)
-    yield Store(db, [900_001])
+    # Most legacy behavior tests need explicitly free users. Welcome-trial behavior has
+    # dedicated tests that construct an enabled Store over this isolated database.
+    yield Store(db, [900_001], welcome_trial_enabled=False)
     async with db.engine.begin() as connection:
         await connection.run_sync(Base.metadata.drop_all)
     await db.close()

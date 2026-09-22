@@ -14,6 +14,7 @@ from sqlalchemy.engine import make_url
 from bot.config import normalize_database_url
 from bot.db.database import Database
 from bot.main import PollingDispatcher
+from bot.services.store import Store
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -51,8 +52,33 @@ def test_migration_on_empty_database_and_idempotent_upgrade():
         finally:
             await db.close()
 
+    async def insert_legacy_user() -> None:
+        db = Database(database_url)
+        try:
+            async with db.engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        "INSERT INTO users "
+                        "(telegram_id, username, is_banned, show_premium_badge, created_at) "
+                        "VALUES (880001, 'legacy', false, true, NOW())"
+                    )
+                )
+        finally:
+            await db.close()
+
     asyncio.run(reset_schema())
     env = dict(os.environ, DATABASE_URL=database_url, BOT_TOKEN="")
+    result = subprocess.run(
+        [sys.executable, "-m", "alembic", "upgrade", "0005"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    asyncio.run(insert_legacy_user())
+
     for args in (("upgrade", "head"), ("upgrade", "head"), ("check",)):
         result = subprocess.run(
             [sys.executable, "-m", "alembic", *args],
@@ -77,8 +103,21 @@ def test_migration_on_empty_database_and_idempotent_upgrade():
                 )
                 assert {"users", "profiles", "reactions", "matches", "blocks", "reports"} <= tables
                 assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-                    "0004"
+                    "0006"
                 )
+                legacy = (
+                    await connection.execute(
+                        text(
+                            "SELECT trial_used, trial_started_at, trial_ends_at "
+                            "FROM users WHERE telegram_id = 880001"
+                        )
+                    )
+                ).one()
+                assert legacy == (True, None, None)
+            legacy_store = Store(db, [], welcome_trial_enabled=True, welcome_trial_days=7)
+            synced = await legacy_store.sync_user_with_status(880_001, "legacy")
+            assert not synced.welcome_trial_granted
+            assert synced.user.trial_ends_at is None
         finally:
             await db.close()
 

@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 from sqlalchemy import and_, case, delete, exists, func, or_, select, text
@@ -49,36 +49,171 @@ class Decision:
     recipient_telegram_id: int | None = None
 
 
+@dataclass(frozen=True)
+class UserSyncResult:
+    user: User
+    welcome_trial_granted: bool
+
+
+@dataclass(frozen=True)
+class TrialNotification:
+    user_id: int
+    telegram_id: int
+    kind: str
+    trial_started_at: datetime
+    trial_ends_at: datetime
+
+
 def pair_clause(left: Any, right: Any, actor: Any, target: Any):
     return or_(and_(left == actor, right == target), and_(left == target, right == actor))
 
 
 class Store:
     def __init__(
-        self, db: Database, admin_ids: list[int], *, stars_sales_enabled: bool = True
+        self,
+        db: Database,
+        admin_ids: list[int],
+        *,
+        stars_sales_enabled: bool = True,
+        welcome_trial_enabled: bool = True,
+        welcome_trial_days: int = 7,
     ) -> None:
+        if welcome_trial_days < 1:
+            raise ValueError("welcome_trial_days must be positive")
         self.db = db
         self.admin_ids = frozenset(admin_ids)
         self.stars_sales_enabled = stars_sales_enabled
+        self.welcome_trial_enabled = welcome_trial_enabled
+        self.welcome_trial_days = welcome_trial_days
 
-    async def sync_user(self, telegram_id: int, username: str | None) -> User:
+    async def sync_user(
+        self, telegram_id: int, username: str | None, *, now: datetime | None = None
+    ) -> User:
+        return (await self.sync_user_with_status(telegram_id, username, now=now)).user
+
+    async def sync_user_with_status(
+        self, telegram_id: int, username: str | None, *, now: datetime | None = None
+    ) -> UserSyncResult:
+        """Create or refresh a user, atomically consuming the one-time trial eligibility."""
+        registered_at = now or datetime.now(UTC)
+        trial_started_at = registered_at if self.welcome_trial_enabled else None
+        trial_ends_at = (
+            registered_at + timedelta(days=self.welcome_trial_days)
+            if self.welcome_trial_enabled
+            else None
+        )
         async with self.db.sessions.begin() as session:
-            user_id = await session.scalar(
+            created_user_id = await session.scalar(
                 insert(User)
-                .values(telegram_id=telegram_id, username=username)
-                .on_conflict_do_update(
-                    index_elements=[User.telegram_id], set_={"username": username}
+                .values(
+                    telegram_id=telegram_id,
+                    username=username,
+                    created_at=registered_at,
+                    trial_started_at=trial_started_at,
+                    trial_ends_at=trial_ends_at,
+                    # Registration consumes eligibility even while the feature is disabled.
+                    trial_used=True,
                 )
+                .on_conflict_do_nothing(index_elements=[User.telegram_id])
                 .returning(User.id)
             )
-            user = await session.get(User, user_id)
+            trial_granted = created_user_id is not None and self.welcome_trial_enabled
+            user = await session.scalar(
+                select(User).where(User.telegram_id == telegram_id).with_for_update()
+            )
             if user is None:
                 raise RuleError("Пользователь не найден.")
+            user.username = username
+            # Rows must never retain eligibility after their first server-side registration.
+            if not user.trial_used:
+                user.trial_used = True
             if not username:
                 profile = await session.get(Profile, user.id)
                 if profile:
                     profile.is_active = False
-            return user
+            return UserSyncResult(user=user, welcome_trial_granted=trial_granted)
+
+    async def claim_trial_notifications(
+        self,
+        *,
+        now: datetime | None = None,
+        user_id: int | None = None,
+        limit: int = 100,
+    ) -> list[TrialNotification]:
+        """Atomically claim due trial notices so concurrent workers cannot duplicate them."""
+        if limit < 1:
+            return []
+        claimed_at = now or datetime.now(UTC)
+        reminder_cutoff = claimed_at + timedelta(hours=24)
+        due = or_(
+            User.trial_welcome_sent_at.is_(None),
+            and_(
+                User.trial_reminder_sent_at.is_(None),
+                User.trial_ends_at > claimed_at,
+                User.trial_ends_at <= reminder_cutoff,
+            ),
+            and_(
+                User.trial_expired_sent_at.is_(None),
+                User.trial_ends_at <= claimed_at,
+            ),
+        )
+        async with self.db.sessions.begin() as session:
+            query = (
+                select(User)
+                .where(User.trial_started_at.is_not(None), User.trial_ends_at.is_not(None), due)
+                .order_by(User.trial_ends_at, User.id)
+                .limit(limit)
+                .with_for_update(skip_locked=True)
+            )
+            if user_id is not None:
+                query = query.where(User.id == user_id)
+            users = list(await session.scalars(query))
+            notifications: list[TrialNotification] = []
+            for user in users:
+                assert user.trial_started_at is not None
+                assert user.trial_ends_at is not None
+                paid_covers_trial = bool(
+                    user.premium_until and user.premium_until > user.trial_ends_at
+                )
+                if user.trial_welcome_sent_at is None:
+                    user.trial_welcome_sent_at = claimed_at
+                    notifications.append(
+                        TrialNotification(
+                            user.id,
+                            user.telegram_id,
+                            "welcome",
+                            user.trial_started_at,
+                            user.trial_ends_at,
+                        )
+                    )
+                if (
+                    user.trial_reminder_sent_at is None
+                    and claimed_at < user.trial_ends_at <= reminder_cutoff
+                ):
+                    user.trial_reminder_sent_at = claimed_at
+                    if not paid_covers_trial:
+                        notifications.append(
+                            TrialNotification(
+                                user.id,
+                                user.telegram_id,
+                                "reminder",
+                                user.trial_started_at,
+                                user.trial_ends_at,
+                            )
+                        )
+                if user.trial_expired_sent_at is None and user.trial_ends_at <= claimed_at:
+                    user.trial_expired_sent_at = claimed_at
+                    if not paid_covers_trial:
+                        notifications.append(
+                            TrialNotification(
+                                user.id,
+                                user.telegram_id,
+                                "expired",
+                                user.trial_started_at,
+                                user.trial_ends_at,
+                            )
+                        )
+            return notifications
 
     async def hide_telegram(self, telegram_id: int) -> None:
         async with self.db.sessions.begin() as session:
@@ -654,8 +789,17 @@ class Store:
 
         granted_at = now or datetime.now(UTC)
         previous_until = user.premium_until
-        starts_at = max(granted_at, previous_until) if previous_until else granted_at
-        new_until = calculate_premium_end(previous_until, cast(Any, plan_code), granted_at)
+        starts_at = max(
+            value
+            for value in (granted_at, previous_until, user.trial_ends_at)
+            if value is not None
+        )
+        new_until = calculate_premium_end(
+            previous_until,
+            cast(Any, plan_code),
+            granted_at,
+            trial_until=user.trial_ends_at,
+        )
         user.premium_until = new_until
 
         session.add(

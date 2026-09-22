@@ -41,18 +41,20 @@ from bot.handlers import (
 from bot.middlewares.access import AccessMiddleware
 from bot.services.payments import PaymentService
 from bot.services.store import Store
+from bot.services.welcome_trial import deliver_trial_notifications
 
 logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 async def payment_notification_loop(bot: Bot, store: Store) -> None:
-    """Retry committed purchase notifications without touching entitlements."""
+    """Deliver persisted payment and welcome-trial notifications."""
     service = PaymentService(store)
     while True:
         try:
             for order in await service.pending_notifications():
                 await payments.deliver_payment_notification(bot, service, order.id)
+            await deliver_trial_notifications(bot, store)
         except Exception as exc:
             logger.warning("Ошибка повтора платёжных уведомлений: %s", type(exc).__name__)
         await asyncio.sleep(60)
@@ -157,7 +159,13 @@ async def run(settings: Settings) -> int:
         )
         return 2
     db = Database(settings.database_url)
-    store = Store(db, settings.admin_ids, stars_sales_enabled=settings.stars_sales_enabled)
+    store = Store(
+        db,
+        settings.admin_ids,
+        stars_sales_enabled=settings.stars_sales_enabled,
+        welcome_trial_enabled=settings.welcome_trial_enabled,
+        welcome_trial_days=settings.welcome_trial_days,
+    )
     bot = Bot(token, default=DefaultBotProperties(parse_mode="HTML"))
     dispatcher = create_dispatcher(store)
     notification_task: asyncio.Task[None] | None = None

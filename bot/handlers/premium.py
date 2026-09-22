@@ -42,10 +42,12 @@ async def premium_menu(
     status = premium_status(user)
 
     if status.is_premium and status.until:
-        text = texts.PREMIUM_ACTIVE.format(
-            until=status.until.strftime("%d.%m.%Y %H:%M UTC"),
-            days=status.days_left,
+        template = (
+            texts.PREMIUM_PAID_ACTIVE
+            if status.kind == "paid"
+            else texts.PREMIUM_TRIAL_ACTIVE
         )
+        text = template.format(until=status.until.strftime("%d.%m.%Y %H:%M UTC"))
     else:
         text = texts.PREMIUM_INTRO
 
