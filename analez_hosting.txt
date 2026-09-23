@@ -1,0 +1,534 @@
+REYADOM TELEGRAM BOT — TEXNIK AUDIT VA STRESS-TEST HISOBOTI
+Audit sanasi: 2026-09-22 — 2026-09-23
+Boshlang‘ich commit: 1506516 (redis added)
+
+Belgilashlar:
+- O‘lchangan — ushbu audit davomida real test yoki instrument orqali olingan natija.
+- Hisoblangan taxmin — o‘lchovdan chiqarilgan, lekin real VPS’da tasdiqlanmagan baho.
+- Tekshirilmagan — audit muhiti yoki xavfsizlik cheklovi sabab bajarilmagan ish.
+
+
+1. LOYIHA HAQIDA QISQA XULOSA
+
+Bot — 18+ tanishuv uchun bitta processli long-polling Telegram bot. Asosiy oqimlar:
+ro‘yxatdan o‘tish, profil va galereya, discovery, like/pass, match, block/report,
+Premium/trial, Telegram Stars to‘lovi va admin moderatsiyasi.
+
+O‘lchangan: yakuniy avtomatik suite 97/97 testdan o‘tdi; Ruff lint va formatter
+tekshiruvlari toza; ikkala Compose konfiguratsiyasi valid; yangi Docker image build bo‘ldi,
+root bo‘lmagan uid=999(bot) bilan ishladi va uning dependency tekshiruvi toza chiqdi.
+
+Yakuniy baho: READY EMAS. Sabab funksional xatolar emas, balki 50 000 profilli datasetda
+discovery query PostgreSQL CPU’ni to‘yintirib, 10 uzluksiz VU’da p95’ni 4.7 sekundga
+chiqarganidir. Kichik auditoriya va 10 000 tagacha sintetik profil uchun natijalar yaxshi,
+ammo katta baza/parallel discovery oldidan qidiruv strategiyasini optimallashtirish va real
+VPS’da qayta load-test qilish kerak.
+
+
+2. ANIQLANGAN TEXNOLOGIYALAR VA ARXITEKTURA
+
+- O‘lchangan: Python 3.11.9, aiogram 3.22.0.
+- O‘lchangan: SQLAlchemy asyncio 2.0.43, asyncpg 0.30.0, PostgreSQL 17.
+- O‘lchangan: redis-py 5.2.1 va Redis 7; hiredis runtime dependency.
+- O‘lchangan: Alembic 1.16.5, yakuniy migration head 0008.
+- Entrypoint: bot/main.py; Dispatcher ham shu faylda create_dispatcher() orqali yaratiladi.
+- Ishlash rejimi: long polling, handle_as_tasks=False; bir bot tokeniga bitta process.
+- Routerlar: payments, start, admin, premium, profile, discovery, matches, moderation,
+  registration va yakuniy fallback router.
+- Handlerlar bot/handlers/, biznes/persistence bot/services/, ORM bot/db/ ichida.
+- FSM: Aiogram RedisStorage, RedisEventIsolation, prefix “fsm”, bot ID bilan ajratiladi.
+- FSM state_ttl va data_ttl default 86 400 sekund; qiymatlar musbat bo‘lishi validatsiyalangan.
+- Doimiy user/profile/reaction/match/payment ma’lumoti PostgreSQL’da; Redis yagona biznes
+  ma’lumot manbai emas.
+- Background task: har 60 sekundda payment va welcome-trial notification retry loop.
+- DB pool: pool_size=5, max_overflow=5, pool_pre_ping=True, pool_timeout=30.
+- Tashqi queue/outbox yo‘q. Notification exactly-once kafolati yo‘q.
+- Dockerfile va Compose mavjud; systemd unit deploy/tanishuv-bot.service mavjud.
+- Testlar: pytest 8.4.2, pytest-asyncio 1.2.0; PostgreSQL integratsion va Redis FSM testlari.
+- Logging: standard logging; token/URL logga yozilmaydi; top-level xatolar tipi loglanadi.
+- Dependency boshqaruvi: aniq pinlangan requirements.txt va requirements-dev.txt.
+
+
+3. BOSHLANG‘ICH HOLAT VA BASELINE
+
+- O‘lchangan: ish boshlanishida git 1506516 commitda toza edi. Audit o‘zgarishlari shu
+  holat ustiga kiritildi; foydalanuvchining mavjud o‘zgarishi o‘chirilmagan.
+- O‘lchangan: yangi audit testlarisiz mavjud suite — 82 passed, 0 failed, 16.23 s.
+- O‘lchangan: ruff check baseline’da o‘tdi.
+- O‘lchangan: ruff format --check baseline’da 13 fayl formatga mos emasligini ko‘rsatdi.
+- O‘lchangan: type checker loyihada sozlanmagan va dev dependency sifatida yo‘q edi;
+  shuning uchun alohida mypy/pyright natijasi mavjud emas.
+- O‘lchangan: host .venv ichidagi pip check uchinchi tomon aider-chat o‘rnatmasi bilan
+  konfliktlarni ko‘rsatdi. Bu production image dependency grafigi emas.
+- O‘lchangan: toza Docker image ichida “No broken requirements found”.
+- O‘lchangan: Compose config va migratsiya tekshiruvlari o‘tdi.
+- O‘lchangan: concurrency auditining dastlabki 11 testi 6 failed, 5 passed bo‘ldi. Shu
+  muvaffaqiyatsizliklar like limiti, Premium event, foto primary va galereya slot race/data
+  invariantlarini reproduksiya qildi.
+
+
+4. TOPILGAN MUAMMOLAR: CRITICAL/HIGH/MEDIUM/LOW
+
+CRITICAL
+- Topilmadi.
+
+HIGH — tuzatildi
+- Bir user turli targetlarga parallel like yuborsa, barcha tranzaksiyalar bir xil kunlik
+  countni ko‘rib, free limitdan oshib ketardi.
+- Bir xil Premium event parallel qayta kelganda unique violation yoki muddatning ortiqcha
+  uzayishi mumkin edi.
+- Bir xil Telegram charge parallel qayta ishlanganda payment/grant idempotency race’i bor edi.
+- Parallel galereya amallari bir nechta primary foto, eski profiles.photo_file_id yoki
+  position constraint xatosini keltirishi mumkin edi.
+- Soxta photo callback target ID orqali joriy ko‘rsatilmagan profilni o‘qishga urinish mumkin edi.
+
+HIGH — qolgan
+- 50k profilda discovery Haversine masofasini katta candidate to‘plamida hisoblaydi va
+  sort qiladi. EXPLAIN ANALYZE 180.707 ms va 151 142 shared-hit block ko‘rsatdi; 10 VU’da
+  p95 4 703.53 ms bo‘ldi. Bu production-ready hukmini to‘xtatayotgan asosiy sabab.
+
+MEDIUM — tuzatildi
+- Free user uchun “kuniga 1 undo” matni/constant bor edi, ammo persistent hisob yo‘q va
+  limit amalda cheksiz edi.
+- Boost activation parallel chaqiruvda cooldown’dan ikki marta o‘tishi mumkin edi.
+- Docker bot root userda ishlardi; PostgreSQL porti barcha interfeyslarga publish qilingan edi.
+- Runtime requirements ichida pytest bor edi.
+
+MEDIUM — qolgan
+- Button flood himoyasi faqat react callback uchun va process xotirasida. Ko‘p replica yoki
+  umumiy rate limit uchun Redis-backed limiter yo‘q.
+- Notification outbox/queue yo‘q; DB commit va Telegram send oralig‘ida notification yo‘qolishi
+  mumkin, garchi asosiy like/match yozuvi bazada qolsa ham.
+- Real backup/restore rehearsal va real 2 vCPU/4 GB VPS load testi bajarilmagan.
+- Polling ketma-ket ishlaydi; sekin Telegram API javobi navbatdagi update’ni kechiktirishi mumkin.
+
+LOW — tuzatildi
+- 13 eski fayl formatterga moslashtirildi.
+- Compose restart policy va Docker Python bytecode sozlamasi yaxshilandi.
+
+LOW — qolgan
+- Lokal development Compose’da oddiy development DB credential bor. U loopback bilan
+  cheklangan, lekin production’da albatta alohida kuchli secret ishlatilishi kerak.
+
+
+5. QILINGAN O‘ZGARTIRISHLAR
+
+- Like uchun actor darajasidagi PostgreSQL transaction advisory lock qo‘shildi; turli
+  targetlarga parallel like ham bitta kunlik budgetni ko‘radi.
+- Duplicate reaction limit tekshiruvidan oldin tekshiriladi; limitga yetgandagi replay idempotent.
+- Premium user uchun keraksiz daily like COUNT olib tashlandi.
+- PremiumGrant event_id INSERT ... ON CONFLICT DO NOTHING RETURNING bilan atomik qilindi;
+  user muddati faqat yangi event yozilganda o‘zgaradi.
+- Payment complete/refund charge ID hash’i bo‘yicha transaction advisory lock oldi.
+- Profile photo amallari user row lock bilan seriallashtirildi; bo‘sh eng kichik position qayta
+  ishlatiladi; primary va profiles.photo_file_id bir tranzaksiyada sinxronlanadi.
+- 0007 migratsiya eski primary foto ma’lumotini tuzatadi va user uchun bitta primary foto
+  bo‘lishini partial unique index bilan majbur qiladi.
+- UndoHistory modeli va 0008 migratsiya qo‘shildi; free undo kuniga bir marta, UTC kun bo‘yicha,
+  user row lock ostida hisoblanadi. Premium undo cheklanmagan bo‘lib qoladi.
+- Boost activation user row lock bilan himoyalandi.
+- Gallery callback source/index va FSM’dagi CURRENT_PROFILE targetiga bog‘landi.
+- PostgreSQL/Redis concurrency, callback authorization, query count va pagination regression
+  testlari qo‘shildi.
+- Izolyatsiyalangan compose.audit.yaml va deterministik scripts/audit_load.py qo‘shildi.
+- Docker image root bo‘lmagan “bot” userga o‘tkazildi; production pytest dependency olib tashlandi.
+- PostgreSQL porti 127.0.0.1 ga bog‘landi; postgres va bot uchun restart: unless-stopped qo‘shildi.
+- Audit/report fayllari Docker build contextdan chiqarildi.
+
+
+6. O‘CHIRILGAN KERAKSIZ KOD VA NIMA UCHUN O‘CHIRILDI
+
+- Store.record_undo() placeholder o‘chirildi: u limit/history yozmasdan reactionni o‘chirardi va
+  production oqimida chaqirilmas edi. Uning vazifasi atomik undo_last_pass() ichiga kiritildi.
+- Store.last_pass_target() alohida, chaqirilmaydigan helper o‘chirildi; target topish va o‘chirish
+  endi bitta tranzaksiyada bajariladi.
+- “count_undos_today har doim 0” placeholder implementatsiyasi persistent UndoHistory query’siga
+  almashtirildi.
+- Runtime requirements.txt dan pytest olib tashlandi; u faqat requirements-dev.txt’da kerak.
+- Boshqa dependency/fayl dalilsiz o‘chirilmadi.
+
+
+7. QOLDIRILGAN SHUBHALI KOD VA NIMA UCHUN O‘CHIRILMADI
+
+- premium.py dagi can_use_radius_filter, can_use_incoming_list, can_activate_boost va
+  show_premium_badge hozir to‘g‘ridan-to‘g‘ri chaqirilmaydi. Ular Premium capability public
+  helperlari va yaqin feature API bo‘lishi mumkin; dynamic/kelajak foydalanish isbotisiz
+  o‘chirish xavfsiz deb topilmadi.
+- main.py notification loop va AccessMiddleware’dagi except Exception saqlandi. Ular xatoni
+  jim yutmaydi: exception loglanadi va process/update fault boundary vazifasini bajaradi.
+- In-memory last_decision saqlandi: u ishlatiladi, lekin distributed rate limiter o‘rnini bosmaydi.
+- Alembic tarixiy revisionlari o‘chirilmadi yoki mazmunan qayta yozilmadi; faqat formatter
+  mexanik o‘zgarish kiritdi.
+
+
+8. PYTEST NATIJALARI
+
+Baseline:
+- O‘lchangan: 82 passed, 0 failed, 16.23 s (audit regressionlari qo‘shilishidan oldin).
+
+Muammo reproduksiyasi:
+- O‘lchangan: dastlabki audit regressionlari 6 failed, 5 passed.
+- Parallel free like’da kutilgan 1 o‘rniga 10 ta yangi like yaralgan.
+- Duplicate like limitga yetganda idempotent javob o‘rniga RuleError bergan.
+- Parallel Premium grant unique violation bergan.
+- Ikki primary photo va profile/photo desinxronizatsiyasi kuzatilgan.
+- Delete/add sikli position=5 constraintga urilgan.
+
+Yakuniy:
+- O‘lchangan: 97 passed, 0 failed, 0 skipped, 22.95 s.
+- O‘lchangan: tests/test_audit_database.py — 14 passed.
+- O‘lchangan: Telegram API/Stars real tarmoqqa chiqmagan; testlarda mock/fake ishlatilgan.
+- O‘lchangan: Redis restart persistence/TTL, migratsiya, payment, Premium, registration,
+  discovery, moderation va dispatcher oqimlari suite ichida qamrab olingan.
+
+
+9. LINTER/TYPE/MIGRATION/DOCKER NATIJALARI
+
+- O‘lchangan: ruff check . — PASS.
+- O‘lchangan: ruff format --check . — PASS, 46 fayl formatted.
+- Tekshirilmagan: mypy/pyright — loyiha konfiguratsiyasi va dependency’si yo‘q.
+- O‘lchangan: migration 0006 -> 0007 -> 0008 upgrade — PASS.
+- O‘lchangan: downgrade 0008/0007 orqali 0006 gacha va qayta head upgrade — PASS.
+- O‘lchangan: alembic check — “No new upgrade operations detected.”
+- O‘lchangan: bo‘sh sxemada migration, idempotent ikkinchi upgrade va legacy user — PASS.
+- O‘lchangan: docker compose config --quiet — PASS.
+- O‘lchangan: docker compose -f compose.audit.yaml config --quiet — PASS.
+- O‘lchangan: Docker image toza build — PASS.
+- O‘lchangan: image user uid=999(bot), gid=999(bot); root emas.
+- O‘lchangan: image ichida import bot.main — PASS.
+- O‘lchangan: image ichida pip check — No broken requirements found.
+- O‘lchangan: PostgreSQL va Redis audit konteynerlari healthy.
+- O‘lchangan: git diff --check — PASS.
+- O‘lchangan: bo‘sh/noto‘g‘ri token startup smoke aniq exit=2 va stack trace’siz xabar beradi.
+- Tekshirilmagan: haqiqiy token bilan polling startup/shutdown; xavfsizlik qoidasi sabab real
+  Telegram Bot API’ga ulanilmadi.
+
+
+10. N+1 VA SQL QUERY AUDITI
+
+O‘lchangan yakuniy query sonlari (bitta service operatsiyasi):
+- sync_existing_user: 2
+- profile: 1
+- next_profile: 3
+- profile_gallery: 2
+- like_free: 10
+- like_duplicate: 5
+- pass: 8
+- like_reciprocal: 11
+- match_page: 3
+- admin_stats: 4
+- validate_known_target: 7
+- block_unseen: 8
+- like_premium: 9
+
+N+1 topilmadi: gallery ikki fixed query, match_page uch fixed query bilan ishlaydi; profil
+soniga qarab Python loop ichida alohida DB query ko‘paymaydi.
+
+Oldingi -> keyingi o‘lchov:
+- like_free 9 -> 10 va reciprocal 10 -> 11: actor advisory lock uchun bitta xavfsizlik querysi
+  qo‘shildi; bu race conditionni yopish uchun ongli correctness trade-off.
+- like_premium 10 -> 9: Premium userga kerak bo‘lmagan daily COUNT olib tashlandi.
+- Qolgan nomlangan oqimlarda son o‘zgarmadi.
+
+
+11. POSTGRESQL INDEX VA QUERY O‘ZGARISHLARI
+
+- O‘lchangan: profile_photos uchun user_id WHERE is_primary partial UNIQUE index qo‘shildi.
+  Bu performance’dan ko‘ra ma’lumot invariantini DB darajasida kafolatlaydi.
+- O‘lchangan: undo_history(user_id, created_at) composite index qo‘shildi; kunlik count shu
+  shart bo‘yicha ishlaydi.
+- Mavjud reaction/match/payment unique constraintlar saqlandi va ON CONFLICT/locks bilan
+  birga ishlaydi.
+- O‘lchangan: 50k profilda discovery EXPLAIN ANALYZE execution 180.707 ms, planning 2.408 ms,
+  shared hit 151 142, shared read 0, top node Limit, result 1 row.
+- Full distance sort uchun oddiy B-tree index o‘lchangan muammoni ishonchli tuzatmaydi. PostGIS
+  geography + GiST/KNN yoki biznesga mos bounding/radius strategiyasi alohida dizayn va
+  before/after EXPLAIN bilan kiritilishi kerak. Auditda katta arxitektura o‘zgarishi qilinmadi.
+- Pool maksimumi bitta processda 10 connection; load paytida queueing va PostgreSQL CPU
+  discovery bottleneck bo‘ldi.
+
+
+12. REDIS AUDITI
+
+- O‘lchangan: bitta RedisStorage/client FSM va RedisEventIsolation uchun markaziy yaratiladi;
+  har handler yangi client yaratmaydi.
+- O‘lchangan: key prefix “fsm”, with_bot_id=True; state/data TTL default 86 400 s.
+- O‘lchangan: profil, premium, payment va match PostgreSQL’da; Redis yo‘qolsa biznes record
+  yo‘qolmaydi.
+- O‘lchangan: storage restartdan keyingi FSM davomiyligi, clear va TTL expiry testlari o‘tgan.
+- O‘lchangan: startup Redis PING xatosida URL/secretni chiqarmasdan pollingni boshlamaydi.
+- O‘lchangan: audit Redis 1000 PING — p50 0.078 ms, p95 0.090 ms, p99 0.123 ms.
+- O‘lchangan: Compose Redis porti faqat 127.0.0.1 ga bog‘langan, AOF va named volume bor.
+- Qolgan: umumiy Redis rate limiter/cache yo‘q; hozirgi kichik single-process polling uchun
+  majburiy emas, lekin webhook/multiple replica oldidan kerak bo‘ladi.
+
+
+13. STRESS-TEST MUHITI VA METODIKASI
+
+- O‘lchangan: faqat compose.audit.yaml’dagi izolyatsiyalangan PostgreSQL test bazasi va Redis
+  DB 15 ishlatildi. Runner AUDIT_ISOLATED=1, PostgreSQL nomi _test bilan tugashi va host local
+  bo‘lishini qat’iy tekshiradi.
+- O‘lchangan: real Telegram, real user, real payment yoki outbound Telegram API ishlatilmadi.
+- Vosita: maxsus asyncio service-layer runner. Sabab: loyiha webhook endpointga ega emas;
+  botning real Store/SQLAlchemy tranzaksiyalarini Telegram tarmog‘isiz o‘lchaydi.
+- Workload: har siklda sync, so‘ng 20% menu/sync, 25% browse, 20% pass, 15% like,
+  10% profile/edit, 5% Premium status, 5% matches.
+- Deterministik seed: 20_260_923.
+- Datasetlar: 1k, 10k, 50k user; mos profil/photo va synthetic reaction, match, block, payment.
+- 50k seed: 5000 reaction, 2500 match, 500 block, 500 payment.
+- Resurs limitlari: PostgreSQL 1.0 CPU/1536 MiB, runner 0.9 CPU/1280 MiB,
+  Redis 0.1 CPU/256 MiB. Jami 2 vCPU va 3 GiB container limiti; qolgan RAM OS/Docker uchun.
+- Qabul mezoni: error <1%, p95 <1000 ms, OOM/restart yo‘q, spike’dan keyin recovery.
+- VU “online Telegram user” emas: har VU think-time’siz doimiy navbatdagi service amalini yuboradi.
+
+
+14. STRESS-TEST NATIJALARI: VUS, RPS, P50, P95, P99, ERROR, CPU, RAM
+
+O‘lchangan load natijalari:
+
+Dataset | VU | RPS    | requests | p50 ms  | p95 ms  | p99 ms  | error
+1k      | 5  | 234.46 | 2361     | 22.83   | 40.06   | 55.24   | 0%
+10k     | 5  | 84.40  | 856      | 22.72   | 207.65  | 287.18  | 0%
+50k     | 1  | 20.31  | 306      | 6.58    | 215.94  | 237.13  | 0%
+50k     | 10 | 6.17   | 99       | 1245.14 | 4703.53 | 5397.23 | 0%
+50k spike | 10 | 6.80 | 78       | 42.65   | 3898.99 | 5390.57 | 0%
+50k recovery | 1 | 29.14 | 147   | 3.00    | 123.53  | 148.09  | 0%
+50k final smoke | 1 | 22.55 | 227 | 6.15   | 187.87  | 205.09  | 0%
+
+- O‘lchangan: final 50k fresh seed 1.498 s va 39.10 MiB database hajmi.
+- O‘lchangan oldingi ketma-ket seedlar: 1k 17.08 MiB, 10k 23.85 MiB, 50k 47.31 MiB.
+  Fresh 39.10 MiB qiymati bloat/cache tarixidan kamroq ta’sirlangan asosiy raqamdir.
+- 50k 1 VU event-loop lag p95 5.12 ms; final smoke 4.85 ms.
+- 50k 10 VU’da error 0 bo‘lsa ham p95 mezoni buzildi; shuning uchun 25/50/100/200/500
+  bosqichlariga o‘tilmadi. Bu metodikadagi “oldingi bosqich barqaror bo‘lmasa to‘xta” qoidasidir.
+- O‘lchangan spike’dan keyin 1 VU recovery p95 123.53 ms bo‘lib normal holatga qaytdi.
+
+Soak:
+- O‘lchangan: 1 VU’da 1200 sekundlik jarayon ishladi; kuzatuv paytida container restart/OOM
+  bo‘lmadi. Ikki snapshot oralig‘ida PostgreSQL CPU 76.50–86.28%, RAM 145.6–147.7 MiB;
+  runner CPU 8.58–12.92%, RAM 68.36–68.81 MiB; Redis CPU 0.34–1.09%, RAM
+  10.2–18.68 MiB. Snapshotdagi jami RAM taxminan 235 MiB.
+- Tekshirilmagan: --rm runner yopilganda yakuniy soak JSON terminalda saqlanmagan. Shu sabab
+  soak request soni, latency va yakuniy error rate fakt sifatida berilmaydi. Bu test resurs
+  barqarorligini qisman tasdiqlaydi, to‘liq soak PASS deb hisoblanmaydi.
+
+
+15. OLDINGI VA KEYINGI NATIJALAR TAQQOSLASHI
+
+- Testlar: baseline 82 passed -> final 97 passed; 15 yangi regression/authorization testi.
+- Audit regression: 6 failed/5 passed -> 14/14 audit DB test passed; alohida forged callback
+  testi ham final suite’da passed.
+- Concurrent free like: limitdan 10 ta parallel yangi like o‘tishi -> faqat 1 ta qolgan budget
+  ishlatiladi, yakuniy count aniq FREE_DAILY_LIKES.
+- Concurrent Premium event: unique/duplicate failure -> 8 parallel replay bir xil natija,
+  1 PremiumGrant.
+- Concurrent payment: parallel replay -> 1 PremiumPayment va 1 PremiumGrant.
+- Photo invariant: bir nechta primary/desync/position error -> bitta primary, profile bilan mos,
+  delete slot qayta ishlatiladi.
+- Query: Premium like 10 -> 9; free/reciprocal like xavfsizlik locki sabab 9/10 -> 10/11.
+- Formatter: 13 nomuvofiq fayl -> 0.
+- Docker: root -> uid=999(bot); production image’da pytest bor -> yo‘q.
+- Tekshirilmagan: load performance uchun to‘liq pre-fix va post-fix A/B benchmark olinmagan;
+  tuzatishlar asosan correctnessga tegishli. Load raqamlari “tezlashdi” degan da’vo qilmaydi.
+
+
+16. 2 VCPU / 4 GB SERVER UCHUN XAVFSIZ SIG‘IM
+
+O‘lchangan:
+- 10k profilda 5 uzluksiz VU, 84.40 RPS, p95 207.65 ms — qabul mezonida.
+- 50k profilda 1 uzluksiz VU, final 22.55 RPS, p95 187.87 ms — qabul mezonida.
+- 50k profilda 10 uzluksiz VU, 6.17 RPS, p95 4703.53 ms — xavfsiz emas.
+
+Konservativ xulosa:
+- 50k dataset uchun isbotlangan xavfsiz nuqta: 1 think-time’siz faol VU va 15–20 RPS
+  production budget. O‘lchovning o‘zi 20.31–22.55 RPS berdi, lekin headroom uchun pastroq
+  budget tavsiya qilinadi.
+- 2–9 VU alohida bosqichlarda o‘lchanmagan; shuning uchun xavfsiz deb da’vo qilinmaydi.
+- 10k dataset uchun 5 VU/84.40 RPS o‘lchangan, lekin real Telegram API latency/rate limit
+  bu throughputni pasaytiradi.
+
+Hisoblangan taxmin:
+- 2 vCPU/4 GB haqiqiy VPS’da Docker Desktop natijasi ±30–50% yoki undan ko‘p farq qilishi
+  mumkin. CPU modeli, NVMe, virtualization va PostgreSQL sozlamalari noma’lum.
+- Xavfsiz production start: bitta polling process, PostgreSQL/Redis private, alert bilan
+  10–15 update/s limitdan boshlash. 50k bazada discovery optimallashtirilmaguncha agressiv
+  concurrency reklama qilinmasin.
+
+
+17. TAXMINIY JAMI USER VA BIR VAQTDA FAOL USER FARQI
+
+- Jami ro‘yxatdan o‘tgan user — asosan DB disk hajmi, index hajmi va discovery candidate
+  soniga ta’sir qiladi. Telegramda “online” bo‘lishning o‘zi botga yuk bermaydi.
+- Bir vaqtda faol user — ayni paytda update yuborayotgan user. Ushbu runnerdagi VU esa
+  think-time’siz uzluksiz ishlaydi; odatiy insondan ancha og‘ir.
+- O‘lchangan: 50k synthetic user/profil va bog‘liq yozuvlar fresh bazada 39.10 MiB.
+- Hisoblangan taxmin: ayni synthetic nisbat chiziqli qolsa, 1 million user xom DB hajmi
+  taxminan 0.8 GiB. Real bio, ko‘proq foto/reaction/payment, index bloat, WAL va backup bilan
+  bir necha baravar headroom kerak. Bu capacity kafolati emas.
+- 50 GB diskda user qatori sig‘ishi discovery tez ishlaydi degani emas: bu auditda performance
+  chegarasi diskdan ancha oldin, 50k dataset/parallel distance sortda ko‘rindi.
+- “Necha real online user?” Tekshirilmagan: insoniy think-time distribution va real Telegram
+  API bilan alohida test qilinmagan.
+
+
+18. ASOSIY BOTTLENECKLAR
+
+1) PostgreSQL discovery query: Haversine hisoblash va katta candidate setni sort qilish.
+   50k/10 VU’da p95 4.7 s va throughput collapse kuzatildi.
+2) Polling handle_as_tasks=False: Telegram tarmog‘idagi sekin send/getChat navbatdagi update’ni
+   kutdiradi. Bu correctness uchun sodda, throughput uchun cheklov.
+3) Bitta process va 5+5 DB connection pool. Hozir Redis emas, PostgreSQL CPU/query asosiy
+   bottleneck; Redis p95 0.090 ms.
+4) Tashqi Telegram rate limitlari lokal service-layer load testda yo‘q. Real throughput undan
+   pastroq bo‘lishi mumkin.
+5) Outbox/rate limit observability yetishmaydi; incidentda notification va flood boshqaruvi
+   qo‘lda monitoring talab qiladi.
+
+
+19. PRODUCTION HOSTING TAVSIYASI
+
+- Hozircha bitta 2 vCPU/4 GB/50 GB NVMe VPS, bitta polling bot process, PostgreSQL va Redis
+  private network/loopback’da ishlashi mumkin, ammo discovery optimallashtirilgandan keyin.
+- PostgreSQL uchun muntazam pg_dump yoki provider snapshot, off-host nusxa va restore rehearsal.
+- Redis’ni public 6379’da ochmang; AOF/volume saqlansin. Redis yo‘qolishi biznes DB’ni
+  yo‘qotmaydi, lekin tugallanmagan FSM yo‘qoladi.
+- Botni root bilan ishlatmang; Docker’dagi bot user yoki systemd’dagi tanishuv userdan foydalaning.
+- Polling replica=1. Webhook/multi-replica kerak bo‘lsa HTTPS, secret_token, distributed rate
+  limit/update dedupe va notification queue dizayni talab qilinadi.
+- Metrics/alert: process restart, DB CPU, p95 discovery, pool wait, DB disk, Redis memory,
+  payment review/refund_unknown va Telegram 429.
+- Log rotation va maxfiy .env permission 0600; production credentiallarni repositoryga yozmang.
+
+
+20. DEPLOYDAN OLDIN BAJARILADIGAN ISHLAR
+
+Majburiy:
+1) Discovery uchun PostGIS geography + GiST/KNN yoki biznesga mos radius/bounding strategiyasini
+   loyihalash, migration va exact-order regression test yozish.
+2) 50k datasetda 1/2/5/10/25 VU bosqichlarini qayta bajarib p95 <1 s ni tasdiqlash.
+3) Productionga o‘xshash real 2 vCPU/4 GB VPS’da 20–30 min soakni yakuniy JSON/metrics bilan
+   qayta bajarish.
+4) pg_dump olish va boshqa test instance’ga restore qilishni amalda sinash.
+5) Production DB/Redis credential, BOT_TOKEN va ADMIN_IDS’ni secret store/.env’da o‘rnatish;
+   development credentialni ishlatmaslik.
+6) alembic upgrade head, so‘ng version_num=0008 ekanini tekshirish.
+7) 2–3 test Telegram akkauntida registration, like/match/contact, Stars test payment,
+   refund/support, ban/report/delete va restartni qo‘lda tekshirish.
+
+Tavsiya:
+8) Redis-backed umumiy rate limit va monitoring qo‘shish.
+9) Muhim notificationlar uchun transactional outbox/worker loyihalash.
+10) CI’da pytest, ruff check, ruff format --check, alembic check va Docker buildni majburiy qilish.
+
+
+21. QOLGAN XAVFLAR VA BAJARILMAGAN TESTLAR
+
+- Tekshirilmagan: real Telegram API, haqiqiy file_id, BotFather sozlamalari va real Stars sandbox.
+- Tekshirilmagan: real VPS kernel/CPU/NVMe/network bilan capacity.
+- Tekshirilmagan: final metrics bilan to‘liq soak; resurs snapshotlari bor, yakuniy JSON yo‘q.
+- Tekshirilmagan: backup restore rehearsal, disk-full, network partition va PostgreSQL failover.
+- Tekshirilmagan: 25/50/100/200/500 VU; 10 VU p95 mezoni buzilgani uchun xavfsiz to‘xtatildi.
+- Tekshirilmagan: webhook, secret_token va multi-replica; loyiha hozir polling.
+- Type checker bajarilmadi, chunki loyiha sozlamagan.
+- Host .venv global aider-chat bilan ifloslangan; production Docker image dependency’si toza.
+- In-memory cooldown restartda yo‘qoladi; DB unique/transaction duplicate biznes amalni himoya
+  qiladi, ammo umumiy spam limit emas.
+- Notification exactly-once va barcha update uchun global idempotency key mavjud emas.
+
+
+22. ISHGA TUSHIRILGAN BUYRUQLAR
+
+Asosiy buyruqlar (secretlar hisobotga kiritilmadi):
+
+git status --short
+git diff --check
+python3.11 --version
+.venv/bin/ruff check .
+.venv/bin/ruff format --check .
+.venv/bin/pip check
+docker compose config --quiet
+docker compose -f compose.audit.yaml config --quiet
+docker compose -f compose.audit.yaml up -d postgres redis
+docker compose -f compose.audit.yaml ps
+docker compose -f compose.audit.yaml exec -T postgres pg_isready -U postgres -d reyadom_audit_test
+docker compose -f compose.audit.yaml exec -T redis redis-cli ping
+
+TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:55439/reyadom_audit_test \
+TEST_REDIS_URL=redis://127.0.0.1:56389/15 \
+.venv/bin/pytest -q --tb=short
+
+DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:55439/reyadom_migration_test \
+.venv/bin/alembic upgrade head
+DATABASE_URL=... .venv/bin/alembic downgrade 0006
+DATABASE_URL=... .venv/bin/alembic upgrade head
+DATABASE_URL=... .venv/bin/alembic check
+
+docker compose build bot
+docker run --rm --entrypoint id reyadom_tg_bot-bot:latest
+docker run --rm --entrypoint python reyadom_tg_bot-bot:latest -m pip check
+docker run --rm --entrypoint python reyadom_tg_bot-bot:latest -c "import bot.main"
+
+docker compose -f compose.audit.yaml --profile runner run --rm runner \
+python scripts/audit_load.py seed --users 50000
+docker compose -f compose.audit.yaml --profile runner run --rm runner \
+python scripts/audit_load.py load --users 50000 --vus 1 --duration 10 --label final-smoke
+
+Matrix runner 1k/10k/50k seed, EXPLAIN, Redis latency, staged load, spike, recovery va
+1200 sekund soakni ham ishga tushirdi.
+
+
+23. O‘ZGARGAN FAYLLAR RO‘YXATI
+
+Mantiq, xavfsizlik va deployment:
+- .dockerignore
+- Dockerfile
+- compose.yaml
+- requirements.txt
+- bot/db/models.py
+- bot/handlers/discovery.py
+- bot/services/payments.py
+- bot/services/premium.py
+- bot/services/store.py
+
+Yangi migratsiyalar:
+- alembic/versions/0007_enforce_primary_photo.py
+- alembic/versions/0008_add_undo_history.py
+
+Test va audit infratuzilmasi:
+- tests/test_audit_database.py
+- tests/test_telegram_flow.py
+- tests/test_migrations_startup.py
+- compose.audit.yaml
+- scripts/audit_load.py
+- analez_hosting.txt
+
+Faqat Ruff formatter mexanik o‘zgartirgan fayllar:
+- alembic/versions/0004_add_premium_system.py
+- alembic/versions/0005_add_stars_payments.py
+- alembic/versions/0006_add_welcome_trial.py
+- bot/config.py
+- bot/handlers/admin.py
+- bot/handlers/moderation.py
+- bot/handlers/payments.py
+- bot/handlers/premium.py
+- bot/keyboards/common.py
+- bot/services/welcome_trial.py
+- tests/test_premium.py
+- tests/test_redis_fsm.py
+- tests/test_welcome_trial.py
+
+
+24. YAKUNIY HUKM: PRODUCTION READY / SHARTLI READY / READY EMAS
+
+HUKM: READY EMAS.
+
+Kodning funksional va concurrency holati auditdan keyin ancha mustahkam: 97 test o‘tdi,
+payment/Premium/like/photo/undo race’lari yopildi, migratsiyalar va Docker tekshirildi.
+Ammo 50k datasetda 10 doimiy VU p95=4.7 s bo‘ldi va PostgreSQL CPU discovery query sabab
+to‘yindi. 50k uchun faqat 1 uzluksiz VU/22.55 RPS nuqtasi ishonchli o‘lchangan.
+
+Productionga chiqish sharti: discovery queryni optimallashtirish, 2/5/10 VU oralig‘ini qayta
+o‘lchash, real 2 vCPU/4 GB VPS soakni to‘liq metrika bilan tugatish, backup restore rehearsal
+va haqiqiy Telegram test akkauntlari bilan qo‘lda smoke-test. Kichik yopiq beta faqat qat’iy
+monitoring va konservativ 10–15 update/s budget bilan tavakkal asosida boshlanishi mumkin;
+bu “production ready” tasdig‘i emas.
