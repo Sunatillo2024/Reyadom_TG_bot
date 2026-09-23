@@ -28,5 +28,3 @@ python-dotenv==1.2.3
 typing-extensions==4.16.0
 typing-inspection==0.4.4
 yarl==1.25.1
-
-pytest

@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
-from sqlalchemy import and_, case, delete, exists, func, or_, select, text
+from sqlalchemy import and_, case, delete, exists, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -17,6 +17,7 @@ from bot.db.models import (
     ProfilePhoto,
     Reaction,
     Report,
+    UndoHistory,
     User,
     utcnow,
 )
@@ -27,6 +28,7 @@ from bot.services.premium import (
     FREE_PHOTO_LIMIT,
     PREMIUM_PHOTO_LIMIT,
     calculate_premium_end,
+    can_undo_pass,
     daily_limit_start,
     has_premium,
     photo_limit,
@@ -249,9 +251,7 @@ class Store:
 
             try:
                 if "latitude" in draft or "longitude" in draft:
-                    latitude, longitude = coordinates(
-                        draft.get("latitude"), draft.get("longitude")
-                    )
+                    latitude, longitude = coordinates(draft.get("latitude"), draft.get("longitude"))
                     city = "Геолокация"
                 else:
                     latitude, longitude = None, None
@@ -319,13 +319,49 @@ class Store:
         else:
             raise RuleError("Недопустимое поле или значение.")
         async with self.db.sessions.begin() as session:
-            await self._actor(session, actor)
+            if field == "photo_file_id":
+                user = await session.scalar(select(User).where(User.id == actor).with_for_update())
+                if not user or user.is_banned:
+                    raise RuleError("Доступ ограничен. Доступны /help, /privacy и /delete.")
+            else:
+                await self._actor(session, actor)
             profile = await session.get(Profile, actor)
             if not profile:
                 raise RuleError("Анкета не найдена. Отправь /start.")
             setattr(profile, field, value)
             if field == "city":
                 profile.city_normalized = normalize_city(value)
+            elif field == "photo_file_id":
+                primary = await session.scalar(
+                    select(ProfilePhoto)
+                    .where(
+                        ProfilePhoto.user_id == actor,
+                        ProfilePhoto.is_primary.is_(True),
+                    )
+                    .with_for_update()
+                )
+                if primary:
+                    primary.file_id = value
+                else:
+                    first_photo = await session.scalar(
+                        select(ProfilePhoto)
+                        .where(ProfilePhoto.user_id == actor)
+                        .order_by(ProfilePhoto.position)
+                        .limit(1)
+                        .with_for_update()
+                    )
+                    if first_photo:
+                        first_photo.file_id = value
+                        first_photo.is_primary = True
+                    else:
+                        session.add(
+                            ProfilePhoto(
+                                user_id=actor,
+                                file_id=value,
+                                is_primary=True,
+                                position=0,
+                            )
+                        )
 
     async def edit_location(self, actor: int, latitude: float, longitude: float) -> None:
         latitude, longitude = coordinates(latitude, longitude)
@@ -394,9 +430,7 @@ class Store:
         distance = case(
             (
                 has_locations,
-                6_371.0088
-                * 2
-                * func.asin(func.least(1.0, func.sqrt(haversine))),
+                6_371.0088 * 2 * func.asin(func.least(1.0, func.sqrt(haversine))),
             ),
             else_=None,
         ).label("distance_km")
@@ -512,30 +546,17 @@ class Store:
         if kind not in {"like", "pass"} or actor == target:
             raise RuleError("Недопустимая реакция.")
         async with self.db.sessions.begin() as session:
+            # The free daily budget is shared by all of an actor's targets. Pair-level
+            # locking alone lets concurrent likes to different users all observe the
+            # same count, so serialize like decisions per actor before counting.
+            if kind == "like":
+                await session.execute(select(func.pg_advisory_xact_lock(actor)))
             low, high = sorted((actor, target))
             await session.execute(select(func.pg_advisory_xact_lock(low, high)))
             user = await self._actor(session, actor, active=True)
 
-            # Check like limit before creating reaction
-            if kind == "like":
-                # Count likes within this transaction to avoid nested sessions
-                from bot.services.premium import daily_limit_start
-
-                now = utcnow()
-                start_of_day = daily_limit_start(now)
-                likes_today = await session.scalar(
-                    select(func.count())
-                    .select_from(Reaction)
-                    .where(
-                        Reaction.from_user_id == actor,
-                        Reaction.kind == "like",
-                        Reaction.created_at >= start_of_day,
-                    )
-                )
-                can_like, error_msg = await self.can_send_like(user, likes_today or 0, now)
-                if not can_like:
-                    raise RuleError(error_msg)
-
+            # A replay consumes no additional budget and must remain idempotent even
+            # after the actor reaches the daily limit.
             previous = await session.scalar(
                 select(Reaction.id).where(
                     Reaction.from_user_id == actor, Reaction.to_user_id == target
@@ -543,6 +564,26 @@ class Store:
             )
             if previous is not None:
                 return Decision(False)
+
+            # Check like limit before creating reaction
+            if kind == "like":
+                now = utcnow()
+                if not has_premium(user, now):
+                    # Count within this transaction after the actor lock so parallel
+                    # free likes share one authoritative budget.
+                    start_of_day = daily_limit_start(now)
+                    likes_today = await session.scalar(
+                        select(func.count())
+                        .select_from(Reaction)
+                        .where(
+                            Reaction.from_user_id == actor,
+                            Reaction.kind == "like",
+                            Reaction.created_at >= start_of_day,
+                        )
+                    )
+                    can_like, error_msg = await self.can_send_like(user, likes_today or 0, now)
+                    if not can_like:
+                        raise RuleError(error_msg)
             eligible = await session.scalar(
                 self._candidates(actor).where(Profile.user_id == target)
             )
@@ -551,9 +592,7 @@ class Store:
             reaction_id = await session.scalar(
                 insert(Reaction)
                 .values(from_user_id=actor, to_user_id=target, kind=kind)
-                .on_conflict_do_nothing(
-                    index_elements=[Reaction.from_user_id, Reaction.to_user_id]
-                )
+                .on_conflict_do_nothing(index_elements=[Reaction.from_user_id, Reaction.to_user_id])
                 .returning(Reaction.id)
             )
             if reaction_id is None:
@@ -573,9 +612,7 @@ class Store:
                 match_id = await session.scalar(
                     insert(Match)
                     .values(user_low_id=low, user_high_id=high)
-                    .on_conflict_do_nothing(
-                        index_elements=[Match.user_low_id, Match.user_high_id]
-                    )
+                    .on_conflict_do_nothing(index_elements=[Match.user_low_id, Match.user_high_id])
                     .returning(Match.id)
                 )
             return Decision(True, match_id, other.telegram_id)
@@ -814,9 +851,7 @@ class Store:
         granted_at = now or datetime.now(UTC)
         previous_until = user.premium_until
         starts_at = max(
-            value
-            for value in (granted_at, previous_until, user.trial_ends_at)
-            if value is not None
+            value for value in (granted_at, previous_until, user.trial_ends_at) if value is not None
         )
         new_until = calculate_premium_end(
             previous_until,
@@ -824,24 +859,40 @@ class Store:
             granted_at,
             trial_until=user.trial_ends_at,
         )
-        user.premium_until = new_until
 
-        session.add(
-            PremiumGrant(
-                user_id=user_id,
-                granted_by=admin_id,
-                action="grant",
-                plan_code=plan_code,
-                event_id=event_id,
-                source=source,
-                order_id=order_id,
-                previous_until=previous_until,
-                new_until=new_until,
-                starts_at=starts_at,
-                ends_at=new_until,
-                created_at=granted_at,
-            )
+        grant_values = dict(
+            user_id=user_id,
+            granted_by=admin_id,
+            action="grant",
+            plan_code=plan_code,
+            event_id=event_id,
+            source=source,
+            order_id=order_id,
+            previous_until=previous_until,
+            new_until=new_until,
+            starts_at=starts_at,
+            ends_at=new_until,
+            created_at=granted_at,
         )
+
+        if event_id:
+            inserted = await session.scalar(
+                insert(PremiumGrant)
+                .values(**grant_values)
+                .on_conflict_do_nothing(index_elements=[PremiumGrant.event_id])
+                .returning(PremiumGrant.id)
+            )
+            if inserted is None:
+                existing = await session.scalar(
+                    select(PremiumGrant).where(PremiumGrant.event_id == event_id)
+                )
+                if existing and existing.new_until:
+                    return existing.new_until
+                raise RuleError("Событие Premium уже обработано.")
+        else:
+            session.add(PremiumGrant(**grant_values))
+
+        user.premium_until = new_until
 
         return new_until
 
@@ -914,9 +965,7 @@ class Store:
     async def premium_status_info(self, target_telegram_id: int) -> dict[str, Any]:
         """Get Premium status info for a user by telegram_id."""
         async with self.db.sessions() as session:
-            user = await session.scalar(
-                select(User).where(User.telegram_id == target_telegram_id)
-            )
+            user = await session.scalar(select(User).where(User.telegram_id == target_telegram_id))
             if not user:
                 raise RuleError("Пользователь не найден.")
             status = premium_status(user)
@@ -938,7 +987,12 @@ class Store:
     async def undo_last_pass(self, actor: int) -> Profile | None:
         """Undo last pass reaction and return the un-passed profile."""
         async with self.db.sessions.begin() as session:
-            await self._actor(session, actor, active=True)
+            user = await session.scalar(select(User).where(User.id == actor).with_for_update())
+            if not user or user.is_banned:
+                raise RuleError("Доступ ограничен. Доступны /help, /privacy и /delete.")
+            own_profile = await session.get(Profile, actor)
+            if not own_profile or not own_profile.is_active or not user.username:
+                raise RuleError("Сначала создай анкету или снова сделай её видимой.")
             target = await session.scalar(
                 select(Reaction.to_user_id)
                 .where(Reaction.from_user_id == actor, Reaction.kind == "pass")
@@ -948,6 +1002,24 @@ class Store:
             if not target:
                 return None
 
+            now = utcnow()
+            if not has_premium(user, now):
+                start_of_day = daily_limit_start(now)
+                undos_today = (
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(UndoHistory)
+                        .where(
+                            UndoHistory.user_id == actor,
+                            UndoHistory.created_at >= start_of_day,
+                        )
+                    )
+                    or 0
+                )
+                allowed, error = can_undo_pass(user, undos_today, now)
+                if not allowed:
+                    raise RuleError(error)
+
             await session.execute(
                 delete(Reaction).where(
                     Reaction.from_user_id == actor,
@@ -955,6 +1027,7 @@ class Store:
                     Reaction.kind == "pass",
                 )
             )
+            session.add(UndoHistory(user_id=actor, target_user_id=target, created_at=now))
             return await session.get(Profile, target)
 
     async def count_likes_today(self, user_id: int, now: datetime | None = None) -> int:
@@ -978,34 +1051,19 @@ class Store:
             )
             return count or 0
 
-    async def count_undos_today(self, user_id: int) -> int:
-        """Count undo operations today. (Placeholder - implement when undo tracking is added)"""
-        # This would need a separate undo_history table or reaction modification tracking
-        # For now, return 0 as undo feature is not yet implemented
-        return 0
-
-    async def record_undo(self, user_id: int, target_id: int, now: datetime) -> None:
-        """Record an undo operation. (Placeholder - implement when undo feature is added)"""
-        # This would delete the most recent pass reaction and optionally log it
-        async with self.db.sessions.begin() as session:
-            await session.execute(
-                delete(Reaction).where(
-                    Reaction.from_user_id == user_id,
-                    Reaction.to_user_id == target_id,
-                    Reaction.kind == "pass",
+    async def count_undos_today(self, user_id: int, now: datetime | None = None) -> int:
+        """Count profile-return operations in the current UTC day."""
+        start_of_day = daily_limit_start(now)
+        async with self.db.sessions() as session:
+            count = await session.scalar(
+                select(func.count())
+                .select_from(UndoHistory)
+                .where(
+                    UndoHistory.user_id == user_id,
+                    UndoHistory.created_at >= start_of_day,
                 )
             )
-
-    async def last_pass_target(self, user_id: int) -> int | None:
-        """Get the last profile user passed on."""
-        async with self.db.sessions() as session:
-            result = await session.scalar(
-                select(Reaction.to_user_id)
-                .where(Reaction.from_user_id == user_id, Reaction.kind == "pass")
-                .order_by(Reaction.created_at.desc())
-                .limit(1)
-            )
-            return result
+            return count or 0
 
     # Profile photos (multiple photos)
 
@@ -1023,18 +1081,16 @@ class Store:
     async def add_profile_photo(self, user_id: int, file_id: str) -> ProfilePhoto:
         """Add a new photo to user's profile. Checks Premium photo limit."""
         async with self.db.sessions.begin() as session:
-            user = await session.get(User, user_id)
+            user = await session.scalar(select(User).where(User.id == user_id).with_for_update())
             if not user:
                 raise RuleError("Пользователь не найден.")
 
-            existing_count = (
-                await session.scalar(
-                    select(func.count())
-                    .select_from(ProfilePhoto)
-                    .where(ProfilePhoto.user_id == user_id)
+            positions = set(
+                await session.scalars(
+                    select(ProfilePhoto.position).where(ProfilePhoto.user_id == user_id)
                 )
-                or 0
             )
+            existing_count = len(positions)
 
             limit = photo_limit(user)
             if existing_count >= limit:
@@ -1046,11 +1102,9 @@ class Store:
                 else:
                     raise RuleError(f"Достигнут лимит фото ({limit}).")
 
-            # Find next available position
-            max_position = await session.scalar(
-                select(func.max(ProfilePhoto.position)).where(ProfilePhoto.user_id == user_id)
-            )
-            next_position = (max_position + 1) if max_position is not None else 0
+            # Reuse the lowest hole so delete/add cycles never exceed the DB's 0..4
+            # position constraint.
+            next_position = next(position for position in range(limit) if position not in positions)
 
             photo = ProfilePhoto(
                 user_id=user_id,
@@ -1066,6 +1120,9 @@ class Store:
     async def remove_profile_photo(self, user_id: int, photo_id: int) -> None:
         """Remove a photo. Cannot remove if it's the only photo."""
         async with self.db.sessions.begin() as session:
+            user = await session.scalar(select(User).where(User.id == user_id).with_for_update())
+            if not user:
+                raise RuleError("Пользователь не найден.")
             photo_count = await session.scalar(
                 select(func.count())
                 .select_from(ProfilePhoto)
@@ -1084,6 +1141,7 @@ class Store:
 
             # If removed photo was primary, set another as primary
             if was_primary:
+                await session.flush()
                 new_primary = await session.scalar(
                     select(ProfilePhoto)
                     .where(ProfilePhoto.user_id == user_id)
@@ -1092,19 +1150,25 @@ class Store:
                 )
                 if new_primary:
                     new_primary.is_primary = True
+                    profile = await session.get(Profile, user_id)
+                    if profile:
+                        profile.photo_file_id = new_primary.file_id
 
     async def set_primary_photo(self, user_id: int, photo_id: int) -> None:
         """Set a photo as primary (main profile photo)."""
         async with self.db.sessions.begin() as session:
+            user = await session.scalar(select(User).where(User.id == user_id).with_for_update())
+            if not user:
+                raise RuleError("Пользователь не найден.")
             photo = await session.get(ProfilePhoto, photo_id)
             if not photo or photo.user_id != user_id:
                 raise RuleError("Фото не найдено.")
 
             # Unset all other primary flags
             await session.execute(
-                select(ProfilePhoto)
+                update(ProfilePhoto)
                 .where(ProfilePhoto.user_id == user_id, ProfilePhoto.is_primary.is_(True))
-                .with_for_update()
+                .values(is_primary=False)
             )
 
             # Set new primary
@@ -1122,7 +1186,7 @@ class Store:
         from datetime import timedelta
 
         async with self.db.sessions.begin() as session:
-            user = await session.get(User, user_id)
+            user = await session.scalar(select(User).where(User.id == user_id).with_for_update())
             if not user:
                 raise RuleError("Пользователь не найден.")
 

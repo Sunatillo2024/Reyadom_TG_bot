@@ -194,8 +194,12 @@ async def switch_photo(
         raise RuleError("Кнопка устарела или недействительна.")
 
     target = target_id(parts[1])
-    photo_index = int(parts[2])
     source = parts[3]
+    if not parts[2].isascii() or not parts[2].isdecimal() or source not in {"i", "d"}:
+        raise RuleError("Кнопка устарела или недействительна.")
+    photo_index = int(parts[2])
+    if photo_index >= 5 or (await state.get_data()).get(CURRENT_PROFILE_KEY) != target:
+        raise RuleError("Кнопка устарела или недействительна.")
 
     profile = await store.profile(target)
     if not profile:

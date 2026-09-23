@@ -53,9 +53,7 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id"),
     )
     op.create_index("ix_premium_orders_user_id", "premium_orders", ["user_id"])
-    op.create_index(
-        "ix_premium_orders_buyer_telegram_id", "premium_orders", ["buyer_telegram_id"]
-    )
+    op.create_index("ix_premium_orders_buyer_telegram_id", "premium_orders", ["buyer_telegram_id"])
     op.create_index("ix_premium_orders_status", "premium_orders", ["status"])
     op.create_index("ix_premium_orders_expires_at", "premium_orders", ["expires_at"])
     op.create_index(
@@ -112,9 +110,7 @@ def upgrade() -> None:
     op.add_column(
         "premium_grants", sa.Column("starts_at", sa.DateTime(timezone=True), nullable=True)
     )
-    op.add_column(
-        "premium_grants", sa.Column("ends_at", sa.DateTime(timezone=True), nullable=True)
-    )
+    op.add_column("premium_grants", sa.Column("ends_at", sa.DateTime(timezone=True), nullable=True))
     op.add_column(
         "premium_grants", sa.Column("reversed_at", sa.DateTime(timezone=True), nullable=True)
     )
@@ -122,9 +118,7 @@ def upgrade() -> None:
     op.create_check_constraint(
         "ck_grant_action", "premium_grants", "action IN ('grant', 'revoke', 'refund')"
     )
-    op.create_check_constraint(
-        "ck_grant_source", "premium_grants", "source IN ('admin', 'stars')"
-    )
+    op.create_check_constraint("ck_grant_source", "premium_grants", "source IN ('admin', 'stars')")
     op.create_foreign_key(
         "fk_premium_grants_order_id", "premium_grants", "premium_orders", ["order_id"], ["id"]
     )
@@ -144,9 +138,7 @@ def downgrade() -> None:
     op.drop_constraint("fk_premium_grants_order_id", "premium_grants", type_="foreignkey")
     op.drop_constraint("ck_grant_source", "premium_grants", type_="check")
     op.drop_constraint("ck_grant_action", "premium_grants", type_="check")
-    op.create_check_constraint(
-        "ck_grant_action", "premium_grants", "action IN ('grant', 'revoke')"
-    )
+    op.create_check_constraint("ck_grant_action", "premium_grants", "action IN ('grant', 'revoke')")
     op.drop_column("premium_grants", "reversed_at")
     op.drop_column("premium_grants", "ends_at")
     op.drop_column("premium_grants", "starts_at")

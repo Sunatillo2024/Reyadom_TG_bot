@@ -42,9 +42,7 @@ async def test_redis_connection_and_fsm_data_survive_storage_recreation(redis_te
     url, key_builder = redis_test_resource
     key_one = StorageKey(bot_id=1, chat_id=101, user_id=101)
     key_two = StorageKey(bot_id=1, chat_id=202, user_id=202)
-    storage = RedisStorage.from_url(
-        url, key_builder=key_builder, state_ttl=60, data_ttl=60
-    )
+    storage = RedisStorage.from_url(url, key_builder=key_builder, state_ttl=60, data_ttl=60)
     try:
         assert await storage.redis.ping()
         first_context = FSMContext(storage=storage, key=key_one)
@@ -66,9 +64,7 @@ async def test_redis_connection_and_fsm_data_survive_storage_recreation(redis_te
         await storage.close()
 
     # A new RedisStorage represents a restarted bot process using the same keys.
-    resumed_storage = RedisStorage.from_url(
-        url, key_builder=key_builder, state_ttl=60, data_ttl=60
-    )
+    resumed_storage = RedisStorage.from_url(url, key_builder=key_builder, state_ttl=60, data_ttl=60)
     try:
         resumed_context = FSMContext(storage=resumed_storage, key=key_one)
         assert await resumed_context.get_state() == Registration.age.state

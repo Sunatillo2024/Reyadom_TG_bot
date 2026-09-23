@@ -53,23 +53,17 @@ def test_has_premium() -> None:
     assert not has_premium(user_free, now)
 
     # Active premium
-    user_prem = User(
-        id=2, telegram_id=2, premium_until=datetime(2026, 1, 20, 12, 0, 0, tzinfo=UTC)
-    )
+    user_prem = User(id=2, telegram_id=2, premium_until=datetime(2026, 1, 20, 12, 0, 0, tzinfo=UTC))
     assert has_premium(user_prem, now)
 
     # Expired premium
-    user_exp = User(
-        id=3, telegram_id=3, premium_until=datetime(2026, 1, 10, 12, 0, 0, tzinfo=UTC)
-    )
+    user_exp = User(id=3, telegram_id=3, premium_until=datetime(2026, 1, 10, 12, 0, 0, tzinfo=UTC))
     assert not has_premium(user_exp, now)
 
 
 def test_photo_limit() -> None:
     user_free = User(id=1, telegram_id=1, premium_until=None)
-    user_prem = User(
-        id=2, telegram_id=2, premium_until=datetime.now(UTC) + timedelta(days=30)
-    )
+    user_prem = User(id=2, telegram_id=2, premium_until=datetime.now(UTC) + timedelta(days=30))
 
     assert photo_limit(user_free) == FREE_PHOTO_LIMIT
     assert photo_limit(user_prem) == PREMIUM_PHOTO_LIMIT
@@ -77,9 +71,7 @@ def test_photo_limit() -> None:
 
 def test_can_send_like() -> None:
     user_free = User(id=1, telegram_id=1, premium_until=None)
-    user_prem = User(
-        id=2, telegram_id=2, premium_until=datetime.now(UTC) + timedelta(days=30)
-    )
+    user_prem = User(id=2, telegram_id=2, premium_until=datetime.now(UTC) + timedelta(days=30))
 
     # Free user within limits
     allowed, _ = can_send_like(user_free, 0)
@@ -108,9 +100,7 @@ def test_premium_status() -> None:
     assert status_free.days_left == 0
     assert status_free.until is None
 
-    user_prem = User(
-        id=2, telegram_id=2, premium_until=datetime(2026, 1, 20, 12, 0, 0, tzinfo=UTC)
-    )
+    user_prem = User(id=2, telegram_id=2, premium_until=datetime(2026, 1, 20, 12, 0, 0, tzinfo=UTC))
     status_prem = premium_status(user_prem, now)
     assert status_prem.is_premium
     assert status_prem.days_left == 5

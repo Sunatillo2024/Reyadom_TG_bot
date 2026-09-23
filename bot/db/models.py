@@ -116,6 +116,18 @@ class Reaction(Base):
     )
 
 
+class UndoHistory(Base):
+    __tablename__ = "undo_history"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    target_user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    __table_args__ = (
+        CheckConstraint("user_id != target_user_id", name="ck_undo_self"),
+        Index("ix_undo_history_user_created", "user_id", "created_at"),
+    )
+
+
 class Match(Base):
     __tablename__ = "matches"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -175,7 +187,12 @@ class ProfilePhoto(Base):
         CheckConstraint("length(file_id) > 0", name="ck_photo_file_id"),
         CheckConstraint("position >= 0 AND position < 5", name="ck_photo_position"),
         UniqueConstraint("user_id", "position", name="uq_photo_position"),
-        Index("ix_profile_photos_primary", "user_id", "is_primary"),
+        Index(
+            "ix_profile_photos_primary",
+            "user_id",
+            unique=True,
+            postgresql_where=text("is_primary"),
+        ),
     )
 
 
@@ -197,9 +214,7 @@ class PremiumGrant(Base):
     plan_code: Mapped[str | None] = mapped_column(String(20))
     event_id: Mapped[str | None] = mapped_column(String(128))
     source: Mapped[str] = mapped_column(String(10), default="admin", server_default="admin")
-    order_id: Mapped[str | None] = mapped_column(
-        ForeignKey("premium_orders.id"), index=True
-    )
+    order_id: Mapped[str | None] = mapped_column(ForeignKey("premium_orders.id"), index=True)
     previous_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     new_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     starts_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -262,9 +277,7 @@ class PremiumOrder(Base):
 class PremiumPayment(Base):
     __tablename__ = "premium_payments"
     id: Mapped[int] = mapped_column(primary_key=True)
-    order_id: Mapped[str | None] = mapped_column(
-        ForeignKey("premium_orders.id"), index=True
-    )
+    order_id: Mapped[str | None] = mapped_column(ForeignKey("premium_orders.id"), index=True)
     user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), index=True)
     buyer_telegram_id: Mapped[int] = mapped_column(BigInteger, index=True)
     telegram_payment_charge_id: Mapped[str] = mapped_column(String(128), unique=True)

@@ -19,9 +19,7 @@ def upgrade() -> None:
     op.add_column("users", sa.Column("trial_ends_at", sa.DateTime(timezone=True)))
     op.add_column(
         "users",
-        sa.Column(
-            "trial_used", sa.Boolean(), server_default=sa.text("false"), nullable=False
-        ),
+        sa.Column("trial_used", sa.Boolean(), server_default=sa.text("false"), nullable=False),
     )
     op.add_column("users", sa.Column("trial_welcome_sent_at", sa.DateTime(timezone=True)))
     op.add_column("users", sa.Column("trial_reminder_sent_at", sa.DateTime(timezone=True)))

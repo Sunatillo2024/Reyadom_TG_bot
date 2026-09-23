@@ -29,9 +29,7 @@ def notification_text(notification: TrialNotification) -> str:
     )
 
 
-async def deliver_trial_notifications(
-    bot: Bot, store: Store, *, user_id: int | None = None
-) -> int:
+async def deliver_trial_notifications(bot: Bot, store: Store, *, user_id: int | None = None) -> int:
     """Claim and send due notices, returning the number accepted by Telegram."""
     delivered = 0
     for notification in await store.claim_trial_notifications(user_id=user_id):

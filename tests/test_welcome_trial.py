@@ -41,9 +41,12 @@ async def test_new_user_gets_exactly_one_trial_and_restart_does_not_extend(store
     assert recreated.user.trial_ends_at is not None
     assert recreated.user.trial_ends_at.utcoffset() == timedelta(0)
     async with store.db.sessions() as session:
-        assert await session.scalar(
-            select(func.count()).select_from(User).where(User.telegram_id == 700_001)
-        ) == 1
+        assert (
+            await session.scalar(
+                select(func.count()).select_from(User).where(User.telegram_id == 700_001)
+            )
+            == 1
+        )
 
 
 async def test_parallel_registration_creates_one_user_and_one_trial(store):
@@ -51,21 +54,19 @@ async def test_parallel_registration_creates_one_user_and_one_trial(store):
     started_at = datetime(2026, 9, 22, 9, 0, tzinfo=UTC)
 
     results = await asyncio.gather(
-        *(
-            trial_store.sync_user_with_status(700_002, "parallel", now=started_at)
-            for _ in range(8)
-        )
+        *(trial_store.sync_user_with_status(700_002, "parallel", now=started_at) for _ in range(8))
     )
 
     assert sum(result.welcome_trial_granted for result in results) == 1
     assert {result.user.id for result in results} == {results[0].user.id}
-    assert {result.user.trial_ends_at for result in results} == {
-        started_at + timedelta(days=7)
-    }
+    assert {result.user.trial_ends_at for result in results} == {started_at + timedelta(days=7)}
     async with store.db.sessions() as session:
-        assert await session.scalar(
-            select(func.count()).select_from(User).where(User.telegram_id == 700_002)
-        ) == 1
+        assert (
+            await session.scalar(
+                select(func.count()).select_from(User).where(User.telegram_id == 700_002)
+            )
+            == 1
+        )
 
 
 def test_effective_premium_uses_later_end_and_trial_expires_exactly_at_boundary():
@@ -94,9 +95,7 @@ async def test_purchase_during_trial_stacks_and_payment_retry_is_idempotent(stor
     service = PaymentService(trial_store)
     now = datetime(2026, 9, 22, 11, 0, tzinfo=UTC)
     user = await trial_store.sync_user(700_003, "buyer", now=now)
-    order = await service.create_or_reuse_order(
-        user.id, user.telegram_id, "premium_3d", now=now
-    )
+    order = await service.create_or_reuse_order(user.id, user.telegram_id, "premium_3d", now=now)
     payment = PaymentInput(
         telegram_id=user.telegram_id,
         invoice_payload=order_payload(order.id),
@@ -116,16 +115,22 @@ async def test_purchase_during_trial_stacks_and_payment_retry_is_idempotent(stor
     refreshed = await trial_store.sync_user(user.telegram_id, user.username, now=now)
     assert refreshed.premium_until == expected_until
     async with store.db.sessions() as session:
-        assert await session.scalar(
-            select(func.count())
-            .select_from(PremiumPayment)
-            .where(PremiumPayment.telegram_payment_charge_id == payment.charge_id)
-        ) == 1
-        assert await session.scalar(
-            select(func.count())
-            .select_from(PremiumGrant)
-            .where(PremiumGrant.event_id == f"stars:{payment.charge_id}")
-        ) == 1
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(PremiumPayment)
+                .where(PremiumPayment.telegram_payment_charge_id == payment.charge_id)
+            )
+            == 1
+        )
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(PremiumGrant)
+                .where(PremiumGrant.event_id == f"stars:{payment.charge_id}")
+            )
+            == 1
+        )
 
 
 async def test_disabled_trial_is_consumed_without_grant(store):

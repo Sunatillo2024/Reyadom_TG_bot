@@ -55,8 +55,7 @@ async def premium_grant_command(message: Message, store: Store) -> None:
     parts = message.text.split()
     if len(parts) != 3:
         raise RuleError(
-            "Формат: /premium_grant TELEGRAM_ID PLAN_CODE\n"
-            "План: premium_3d, premium_1m, premium_3m"
+            "Формат: /premium_grant TELEGRAM_ID PLAN_CODE\nПлан: premium_3d, premium_1m, premium_3m"
         )
 
     target_telegram_id = target_id(parts[1])
@@ -119,9 +118,7 @@ async def premium_revoke_command(message: Message, store: Store) -> None:
     target_telegram_id = target_id(parts[1])
     await store.revoke_premium_by_telegram(message.from_user.id, target_telegram_id)
 
-    await message.answer(
-        f"<b>Premium отозван</b>\n" f"Пользователь: <code>{target_telegram_id}</code>"
-    )
+    await message.answer(f"<b>Premium отозван</b>\nПользователь: <code>{target_telegram_id}</code>")
 
 
 @router.callback_query(F.data.startswith("admin:"))

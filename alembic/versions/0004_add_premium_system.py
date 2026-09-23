@@ -102,9 +102,7 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("event_id", name="uq_grant_event_id"),
     )
-    op.create_index(
-        op.f("ix_premium_grants_user_id"), "premium_grants", ["user_id"], unique=False
-    )
+    op.create_index(op.f("ix_premium_grants_user_id"), "premium_grants", ["user_id"], unique=False)
     op.create_index(
         op.f("ix_premium_grants_event_id"), "premium_grants", ["event_id"], unique=False
     )

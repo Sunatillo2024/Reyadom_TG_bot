@@ -89,21 +89,19 @@ def test_migration_on_empty_database_and_idempotent_upgrade():
             timeout=30,
         )
         assert result.returncode == 0, result.stdout + result.stderr
+
     async def inspect_schema() -> None:
         db = Database(database_url)
         try:
             async with db.engine.connect() as connection:
                 tables = set(
                     await connection.scalars(
-                        text(
-                            "SELECT tablename FROM pg_tables "
-                            "WHERE schemaname = 'public'"
-                        )
+                        text("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
                     )
                 )
                 assert {"users", "profiles", "reactions", "matches", "blocks", "reports"} <= tables
                 assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-                    "0006"
+                    "0008"
                 )
                 legacy = (
                     await connection.execute(

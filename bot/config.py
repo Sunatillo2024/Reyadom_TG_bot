@@ -15,8 +15,7 @@ def normalize_database_url(value: str) -> str:
     if value.startswith("postgres://"):
         return value.replace("postgres://", "postgresql+asyncpg://", 1)
     raise ValueError(
-        "DATABASE_URL должен быть PostgreSQL URL: "
-        "postgresql+asyncpg://... или postgresql://..."
+        "DATABASE_URL должен быть PostgreSQL URL: postgresql+asyncpg://... или postgresql://..."
     )
 
 

@@ -86,3 +86,6 @@ Thumbs.db
 docker-compose.yml
 docker-compose.*.yml
 Dockerfile.dev
+compose.audit.yaml
+scripts/audit_load.py
+analez_hosting.txt

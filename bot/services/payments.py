@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from secrets import token_hex
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from bot.db.models import PremiumGrant, PremiumOrder, PremiumPayment, User
 from bot.services.premium import PREMIUM_PLANS
@@ -206,6 +206,10 @@ class PaymentService:
         order_id = payload_order_id(payment.invoice_payload)
         now = now or datetime.now(UTC)
         async with self.store.db.sessions.begin() as session:
+            # Telegram may replay the same immutable charge concurrently.
+            await session.execute(
+                select(func.pg_advisory_xact_lock(func.hashtextextended(payment.charge_id, 0)))
+            )
             existing = await session.scalar(
                 select(PremiumPayment)
                 .where(PremiumPayment.telegram_payment_charge_id == payment.charge_id)
@@ -446,6 +450,9 @@ class PaymentService:
         now = refunded_at or datetime.now(UTC)
         order_id = payload_order_id(payload)
         async with self.store.db.sessions.begin() as session:
+            await session.execute(
+                select(func.pg_advisory_xact_lock(func.hashtextextended(charge_id, 0)))
+            )
             payment = await session.scalar(
                 select(PremiumPayment)
                 .where(PremiumPayment.telegram_payment_charge_id == charge_id)

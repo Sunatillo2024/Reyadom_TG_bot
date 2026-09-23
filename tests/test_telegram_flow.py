@@ -33,10 +33,12 @@ from bot.handlers.discovery import (
     PHOTO_INDEX_KEY,
     _show_profile,
     show_next,
+    switch_photo,
 )
 from bot.keyboards.common import decisions
 from bot.main import create_dispatcher
 from bot.services.telegram import caption
+from bot.services.validation import RuleError
 from bot.texts import LEGACY_MENU_LABELS, MENU_LABELS, PREVIOUS_MENU_LABELS
 
 
@@ -279,6 +281,30 @@ async def test_failing_photo_hides_user_and_keeps_saved_profile(store, make_user
     await AccessMiddleware(store)(handler, message, {"bot": bot})
     assert not (await store.profile(user.id)).is_active
     bot.send_message.assert_not_called()
+
+
+async def test_gallery_callback_cannot_read_arbitrary_profile(store, make_user):
+    actor, visible, forged = [await make_user() for _ in range(3)]
+    callback = CallbackQuery(
+        id="forged-gallery",
+        from_user=User(
+            id=actor.telegram_id,
+            is_bot=False,
+            first_name="Actor",
+            username=actor.username,
+        ),
+        chat_instance="test",
+        message=Message(
+            message_id=1,
+            date=datetime.now(UTC),
+            chat=Chat(id=actor.telegram_id, type="private"),
+        ),
+        data=f"photo:{forged.id}:0:d",
+    )
+    state = AsyncMock()
+    state.get_data.return_value = {CURRENT_PROFILE_KEY: visible.id}
+    with pytest.raises(RuleError, match="устарела"):
+        await switch_photo(callback, state, store, actor)
 
 
 async def test_ten_discovery_profiles_reuse_one_message(store, make_user):

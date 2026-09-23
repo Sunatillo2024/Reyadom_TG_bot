@@ -37,9 +37,7 @@ async def block(callback: CallbackQuery, store: Store, user: User) -> None:
     message = get_callback_message(callback)
     target = target_id(get_callback_data(callback).split(":", 1)[1])
     await store.block(user.id, target)
-    await safe_call(
-        store, user.telegram_id, lambda: message.edit_reply_markup(reply_markup=None)
-    )
+    await safe_call(store, user.telegram_id, lambda: message.edit_reply_markup(reply_markup=None))
     await message.answer(
         "<b>Пользователь заблокирован</b>\n"
         "Анкеты больше не будут видны друг другу в боте, а контакт станет недоступен.\n\n"
@@ -111,9 +109,7 @@ async def report_confirm(
     draft = await state.get_data()
     await store.report(user.id, draft["target"], draft["reason"])
     await state.clear()
-    await safe_call(
-        store, user.telegram_id, lambda: message.edit_reply_markup(reply_markup=None)
-    )
+    await safe_call(store, user.telegram_id, lambda: message.edit_reply_markup(reply_markup=None))
     await message.answer(
         "<b>Жалоба сохранена</b>\nАнкета заблокирована для тебя.", reply_markup=home()
     )

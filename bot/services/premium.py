@@ -133,15 +133,15 @@ def can_send_like(user: User, likes_sent_today: int) -> tuple[bool, str]:
     return True, ""
 
 
-def can_undo_pass(user: User, undos_today: int) -> tuple[bool, str]:
+def can_undo_pass(user: User, undos_today: int, now: datetime | None = None) -> tuple[bool, str]:
     """Check if user can undo a pass. Returns (allowed, error_message)."""
-    is_premium = has_premium(user)
+    is_premium = has_premium(user, now)
 
     if is_premium:
         return True, ""
 
     if undos_today >= FREE_DAILY_UNDO:
-        reset_at = daily_limit_reset_at()
+        reset_at = daily_limit_reset_at(now)
         return (
             False,
             f"Возврат анкеты доступен {FREE_DAILY_UNDO} раз в сутки.\n"

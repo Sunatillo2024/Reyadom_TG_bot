@@ -95,10 +95,12 @@ def decisions(
     )
     if can_undo:
         rows.append((("⏪ Вернуть анкету", "undo:pass"),))
-    rows.extend([
-        (("🚫 Заблокировать", f"block:{target}"), ("⚠️ Пожаловаться", f"report:{target}")),
-        (("🏠 В меню", "home"),),
-    ])
+    rows.extend(
+        [
+            (("🚫 Заблокировать", f"block:{target}"), ("⚠️ Пожаловаться", f"report:{target}")),
+            (("🏠 В меню", "home"),),
+        ]
+    )
     return inline(*rows)
 
 
