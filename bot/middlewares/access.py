@@ -14,6 +14,7 @@ from aiogram.exceptions import (
 from aiogram.types import CallbackQuery, Message, TelegramObject
 
 from bot import texts
+from bot.i18n import current_language
 from bot.keyboards.common import inline
 from bot.services.store import Store
 from bot.services.telegram import safe_call
@@ -52,6 +53,7 @@ class AccessMiddleware(BaseMiddleware):
             )
             user = sync_result.user
             data.update(store=self.store, user=user)
+            current_language.set(user.language)
             await deliver_trial_notifications(data["bot"], self.store, user_id=user.id)
             command = (event.data or "") if callback else (event.text or "").split(" ")[0]
             allowed = {
@@ -70,6 +72,9 @@ class AccessMiddleware(BaseMiddleware):
                 "delete:yes",
                 "home",
                 "home:cancel",
+                "lang:uz",
+                "lang:ru",
+                "lang:en",
             }
             payment_event = isinstance(message, Message) and bool(
                 message.successful_payment or message.refunded_payment

@@ -101,7 +101,7 @@ def test_migration_on_empty_database_and_idempotent_upgrade():
                 )
                 assert {"users", "profiles", "reactions", "matches", "blocks", "reports"} <= tables
                 assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-                    "0008"
+                    "0009"
                 )
                 legacy = (
                     await connection.execute(

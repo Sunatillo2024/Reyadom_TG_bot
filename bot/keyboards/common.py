@@ -8,7 +8,7 @@ from aiogram.types import (
     ReplyKeyboardRemove,
 )
 
-from bot.texts import MENU_LABELS
+from bot.i18n import tr
 
 ButtonStyle: TypeAlias = Literal["primary", "success", "danger"]
 ButtonSpec: TypeAlias = tuple[str, str] | tuple[str, str, ButtonStyle]
@@ -33,27 +33,29 @@ def inline(*rows: tuple[ButtonSpec, ...]) -> InlineKeyboardMarkup:
 
 
 def menu() -> ReplyKeyboardMarkup:
-    # aiogram 3.22 forwards Bot API fields it does not yet expose in its signature.
-    # Telegram clients that do not render styles still see the complete action label.
+    labels = [
+        tr(f"menu_{key}")
+        for key in ("discover", "profile", "likes", "matches", "settings", "premium", "help")
+    ]
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=MENU_LABELS[0], style="primary")],
-            [KeyboardButton(text=MENU_LABELS[1]), KeyboardButton(text=MENU_LABELS[2])],
-            [KeyboardButton(text=MENU_LABELS[3])],
-            [KeyboardButton(text=MENU_LABELS[4]), KeyboardButton(text=MENU_LABELS[5])],
-            [KeyboardButton(text=MENU_LABELS[6])],  # Помощь
+            [KeyboardButton(text=labels[0], style="primary")],
+            [KeyboardButton(text=labels[1]), KeyboardButton(text=labels[2])],
+            [KeyboardButton(text=labels[3])],
+            [KeyboardButton(text=labels[4]), KeyboardButton(text=labels[5])],
+            [KeyboardButton(text=labels[6])],
         ],
         resize_keyboard=True,
-        input_field_placeholder="Выбери действие 💜",
+        input_field_placeholder=tr("menu_placeholder"),
     )
 
 
 def location_request() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="📍 Отправить геолокацию", request_location=True)]],
+        keyboard=[[KeyboardButton(text=tr("send_location"), request_location=True)]],
         resize_keyboard=True,
         one_time_keyboard=True,
-        input_field_placeholder="Отправь геолокацию 📍",
+        input_field_placeholder=tr("send_location_placeholder"),
     )
 
 
@@ -61,8 +63,19 @@ def remove_keyboard() -> ReplyKeyboardRemove:
     return ReplyKeyboardRemove()
 
 
+def language_selection() -> InlineKeyboardMarkup:
+    return inline(
+        (("🇺🇿 O'zbekcha", "lang:uz"), ("🇷🇺 Русский", "lang:ru")),
+        (("🇬🇧 English", "lang:en"),),
+    )
+
+
+def language_continue(label: str) -> InlineKeyboardMarkup:
+    return inline(((label, "home"),))
+
+
 def home() -> InlineKeyboardMarkup:
-    return inline((("⚙️ Настройки", "settings"), ("🏠 В меню", "home")))
+    return inline(((tr("menu_settings"), "settings"), (tr("back_menu"), "home")))
 
 
 def decisions(
@@ -89,16 +102,16 @@ def decisions(
 
     rows.append(
         (
-            ("💜 Нравится", f"react:{target}:like:{source}"),
-            ("Дальше ➡️", f"react:{target}:pass:{source}"),
+            (tr("like"), f"react:{target}:like:{source}"),
+            (tr("pass"), f"react:{target}:pass:{source}"),
         ),
     )
     if can_undo:
-        rows.append((("⏪ Вернуть анкету", "undo:pass"),))
+        rows.append(((tr("return_profile"), "undo:pass"),))
     rows.extend(
         [
-            (("🚫 Заблокировать", f"block:{target}"), ("⚠️ Пожаловаться", f"report:{target}")),
-            (("🏠 В меню", "home"),),
+            ((tr("block_profile"), f"block:{target}"), (tr("report_profile"), f"report:{target}")),
+            ((tr("back_menu"), "home"),),
         ]
     )
     return inline(*rows)
@@ -106,34 +119,34 @@ def decisions(
 
 def profile_menu(active: bool) -> InlineKeyboardMarkup:
     return inline(
-        (("Имя", "edit:name"), ("Возраст", "edit:age")),
-        (("Пол", "edit:gender"), ("Кого я ищу", "edit:seeking")),
-        (("📍 Местоположение", "edit:location"),),
-        (("Описание", "edit:bio"), ("Фото", "edit:photo_file_id")),
+        ((tr("name"), "edit:name"), (tr("age"), "edit:age")),
+        ((tr("gender"), "edit:gender"), (tr("seeking"), "edit:seeking")),
+        ((f"📍 {tr('location')}", "edit:location"),),
+        ((tr("bio"), "edit:bio"), (tr("photo"), "edit:photo_file_id")),
         (
             (
-                ("Скрыть анкету" if active else "Показать анкету"),
+                tr("hide_profile") if active else tr("show_profile"),
                 "active:0" if active else "active:1",
             ),
         ),
-        (("🗑 Удалить анкету", "delete"),),
-        (("🏠 В меню", "home"),),
+        ((f"🗑 {tr('delete_profile')}", "delete"),),
+        ((tr("back_menu"), "home"),),
     )
 
 
 def genders(prefix: str, any_gender: bool = False) -> InlineKeyboardMarkup:
     choices: list[ButtonSpec] = [
-        ("Мужчина", f"{prefix}:male"),
-        ("Женщина", f"{prefix}:female"),
+        (tr("male"), f"{prefix}:male"),
+        (tr("female"), f"{prefix}:female"),
     ]
     if any_gender:
-        choices.append(("Неважно", f"{prefix}:any"))
+        choices.append((tr("any"), f"{prefix}:any"))
     return inline(tuple(choices))
 
 
 def match_actions(match_id: int, target: int) -> InlineKeyboardMarkup:
     return inline(
-        (("💬 Открыть контакт", f"contact:{match_id}", "primary"),),
-        (("🚫 Заблокировать", f"block:{target}"), ("⚠️ Пожаловаться", f"report:{target}")),
-        (("✨ Взаимные симпатии", "matches:0"), ("🏠 В меню", "home")),
+        ((tr("open_contact_short"), f"contact:{match_id}", "primary"),),
+        ((tr("block_profile"), f"block:{target}"), (tr("report_profile"), f"report:{target}")),
+        ((tr("matches_short"), "matches:0"), (tr("back_menu"), "home")),
     )

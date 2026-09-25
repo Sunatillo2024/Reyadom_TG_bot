@@ -6,6 +6,7 @@ from aiogram.types import CallbackQuery, Message
 
 from bot import texts
 from bot.db.models import User
+from bot.i18n import tr
 from bot.keyboards.common import inline, match_actions
 from bot.services.store import Store
 from bot.services.telegram import caption, contact_url, target_id
@@ -28,7 +29,7 @@ async def show_matches(message: Message, store: Store, user: User, page: int = 0
         rows.append(tuple(navigation))
     rows.append((("🏠 В меню", "home"),))
     await message.answer(
-        (f"<b>✨ Взаимные симпатии</b>\nСтраница {page + 1}" if entries else texts.NO_MATCHES),
+        (tr("matches_title_page", page=page + 1) if entries else tr("no_matches")),
         reply_markup=inline(*rows),
     )
 

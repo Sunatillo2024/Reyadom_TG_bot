@@ -5,7 +5,8 @@ from aiogram.types import CallbackQuery, Message
 
 from bot import texts
 from bot.db.models import User
-from bot.keyboards.common import inline, menu
+from bot.i18n import normalize_language, tr
+from bot.keyboards.common import inline, language_continue, language_selection, menu
 from bot.services.store import Store
 from bot.states import Registration
 
@@ -16,11 +17,11 @@ async def show_home(message: Message, state: FSMContext, store: Store, user: Use
     await state.clear()
     if user.is_banned:
         await message.answer(
-            "<b>Доступ ограничен</b>\nТы можешь использовать /help, /privacy, /id и /delete.",
+            tr("access_restricted"),
             reply_markup=menu(),
         )
     elif await store.profile(user.id):
-        await message.answer(texts.HOME, reply_markup=menu())
+        await message.answer(tr("home"), reply_markup=menu())
     else:
         await state.set_state(Registration.adult)
         await message.answer(
@@ -33,8 +34,24 @@ async def show_home(message: Message, state: FSMContext, store: Store, user: Use
 
 
 @router.message(CommandStart())
-async def start(message: Message, state: FSMContext, store: Store, user: User) -> None:
-    await show_home(message, state, store, user)
+async def start(message: Message, state: FSMContext, user: User) -> None:
+    await state.clear()
+    await message.answer(tr("welcome", user.language), reply_markup=language_selection())
+
+
+@router.callback_query(F.data.startswith("lang:"))
+async def select_language(
+    callback: CallbackQuery, state: FSMContext, store: Store, user: User
+) -> None:
+    if callback.data is None or callback.message is None:
+        return
+    language = normalize_language(callback.data.split(":", 1)[1])
+    await store.set_language(user.id, language)
+    await state.clear()
+    await callback.message.answer(
+        tr("language_selected", language),
+        reply_markup=language_continue(tr("continue", language)),
+    )
 
 
 @router.callback_query(F.data == "home")

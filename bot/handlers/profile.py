@@ -5,6 +5,7 @@ from aiogram.types import CallbackQuery, Message
 
 from bot import texts
 from bot.db.models import User
+from bot.i18n import tr
 from bot.keyboards.common import genders, inline, location_request, menu, profile_menu
 from bot.services.store import Store
 from bot.services.telegram import caption
@@ -19,7 +20,7 @@ async def my_profile(message: Message, state: FSMContext, store: Store, user: Us
     await state.clear()
     profile = await store.profile(user.id)
     if not profile:
-        await message.answer("Анкета не найдена. Создай её с помощью /start.")
+        await message.answer(tr("profile_missing"))
         return
     try:
         await message.answer_photo(
@@ -29,11 +30,12 @@ async def my_profile(message: Message, state: FSMContext, store: Store, user: Us
         )
     except TelegramBadRequest:
         await message.answer(
-            caption(profile)
-            + "\n\n<i>Не удалось открыть прежнюю фотографию. Нажми «Фото» и загрузи новую.</i>",
+            caption(profile) + "\n\n<i>" + tr("profile_photo_error") + "</i>",
             reply_markup=profile_menu(profile.is_active),
         )
-    await message.answer("<b>Статус анкеты:</b> " + ("активна" if profile.is_active else "скрыта"))
+    await message.answer(
+        tr("profile_status_active" if profile.is_active else "profile_status_hidden")
+    )
 
 
 @router.callback_query(F.data.startswith("edit:"))
@@ -42,14 +44,14 @@ async def edit_begin(callback: CallbackQuery, state: FSMContext, store: Store, u
         return
     field = callback.data.split(":", 1)[1]
     prompts = {
-        "name": "<b>Новое имя</b>\nОтправь от 2 до 40 символов.",
-        "age": "<b>Новый возраст</b>\nОтправь целое число от 18 до 99.",
-        "city": "<b>Новый город</b>\nОтправь от 2 до 60 символов.",
-        "bio": "<b>Новое описание</b>\nОтправь до 300 символов.",
-        "gender": "<b>Выбери пол</b>",
-        "seeking": "<b>Кого ты ищешь?</b>",
-        "location": "<b>Новое местоположение 📍</b>\nОтправь геолокацию кнопкой ниже.",
-        "photo_file_id": "<b>Новое фото</b>\nОтправь одну фотографию как фото.",
+        "name": tr("edit_name"),
+        "age": tr("edit_age"),
+        "city": tr("edit_city"),
+        "bio": tr("edit_bio"),
+        "gender": tr("edit_gender"),
+        "seeking": tr("edit_seeking"),
+        "location": tr("edit_location"),
+        "photo_file_id": tr("edit_photo"),
     }
     if field not in prompts or not await store.profile(user.id):
         raise RuleError("Анкета или поле не найдены.")
@@ -76,7 +78,7 @@ async def edit_value(message: Message, state: FSMContext, store: Store, user: Us
             raise RuleError("Отправь геолокацию с помощью кнопки ниже.")
         await store.edit_location(user.id, message.location.latitude, message.location.longitude)
         await state.clear()
-        await message.answer(texts.PROFILE_SAVED, reply_markup=menu())
+        await message.answer(tr("profile_saved"), reply_markup=menu())
         return
     if field == "photo_file_id":
         if not message.photo or message.media_group_id:
@@ -103,7 +105,7 @@ async def edit_choice(callback: CallbackQuery, state: FSMContext, store: Store, 
         raise RuleError("Эта кнопка сейчас недоступна.")
     await store.edit_profile(user.id, field, "" if value == "empty" else value)
     await state.clear()
-    await callback.message.answer(texts.PROFILE_SAVED, reply_markup=menu())
+    await callback.message.answer(tr("profile_saved"), reply_markup=menu())
 
 
 @router.callback_query(F.data.in_({"active:0", "active:1"}))
@@ -113,11 +115,7 @@ async def active(callback: CallbackQuery, store: Store, user: User) -> None:
     enabled = callback.data == "active:1"
     await store.set_active(user.id, enabled)
     await callback.message.answer(
-        (
-            "<b>Анкета снова видна 💜</b>\nТеперь её могут увидеть другие пользователи."
-            if enabled
-            else "<b>Анкета скрыта</b>\nНовые пользователи не увидят её в поиске."
-        ),
+        tr("profile_visible" if enabled else "profile_hidden"),
         reply_markup=profile_menu(enabled),
     )
 
@@ -137,15 +135,18 @@ async def settings(
         message = event.message
     else:
         message = event
-    location_status = "указана" if profile.latitude is not None else "не указана"
+    location_status = tr("location_set" if profile.latitude is not None else "location_unset")
     await message.answer(
-        f"<b>⚙️ Настройки поиска</b>\n"
-        f"Возраст: {profile.min_age}–{profile.max_age}\n"
-        f"Геолокация: {location_status}",
+        tr(
+            "search_settings",
+            min_age=profile.min_age,
+            max_age=profile.max_age,
+            location=location_status,
+        ),
         reply_markup=inline(
-            (("Возраст для поиска", "settings:age"),),
-            (("📍 Изменить геолокацию", "edit:location"),),
-            (("Кого я ищу", "edit:seeking"), ("🏠 В меню", "home")),
+            ((tr("age_search"), "settings:age"),),
+            ((tr("change_location"), "edit:location"),),
+            ((tr("seeking_label"), "edit:seeking"), (tr("back_menu"), "home")),
         ),
     )
 
@@ -156,11 +157,7 @@ async def age_begin(callback: CallbackQuery, state: FSMContext) -> None:
         return
     await state.clear()
     await state.set_state(Search.age)
-    await callback.message.answer(
-        "<b>Возраст для поиска</b>\n"
-        "Отправь минимальный и максимальный возраст через пробел, например: 20 35.\n\n"
-        "<i>18 ≤ минимум ≤ максимум ≤ 99. /cancel — отмена.</i>"
-    )
+    await callback.message.answer(tr("age_search_prompt"))
 
 
 @router.message(Search.age)
@@ -180,4 +177,4 @@ async def age_save(message: Message, state: FSMContext, store: Store, user: User
         raise RuleError("Анкета не найдена.")
     await store.settings(user.id, low, high, profile.own_city_only)
     await state.clear()
-    await message.answer("<b>Готово!</b> Настройки поиска сохранены 💜", reply_markup=menu())
+    await message.answer(tr("search_saved"), reply_markup=menu())

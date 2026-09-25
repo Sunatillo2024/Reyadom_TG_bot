@@ -110,6 +110,7 @@ class Store:
                 .values(
                     telegram_id=telegram_id,
                     username=username,
+                    language="ru",
                     created_at=registered_at,
                     trial_started_at=trial_started_at,
                     trial_ends_at=trial_ends_at,
@@ -232,6 +233,16 @@ class Store:
             if not profile or not profile.is_active or not user.username:
                 raise RuleError("Сначала создай анкету или снова сделай её видимой.")
         return user
+
+    async def set_language(self, actor: int, language: str) -> User:
+        if language not in {"ru", "uz", "en"}:
+            raise RuleError("Tilni tanlashda xatolik yuz berdi.")
+        async with self.db.sessions.begin() as session:
+            user = await session.get(User, actor)
+            if user is None:
+                raise RuleError("Пользователь не найден.")
+            user.language = language
+            return user
 
     async def profile(self, actor: int) -> Profile | None:
         async with self.db.sessions() as session:
