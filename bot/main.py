@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import sys
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import suppress
 from pathlib import Path
 
@@ -40,6 +40,7 @@ from bot.handlers import (
     registration,
     start,
 )
+from bot.i18n import DEFAULT_LANGUAGE, LANGUAGES, tr
 from bot.middlewares.access import AccessMiddleware
 from bot.services.payments import PaymentService
 from bot.services.store import Store
@@ -71,6 +72,34 @@ def migration_head() -> str:
     return head
 
 
+async def retry_telegram(
+    call: Callable[[], Awaitable[object]], *, attempts: int = 5, base_delay: float = 1.0
+) -> None:
+    """Run a startup Telegram call, retrying transient network failures.
+
+    A container may start before the network route to api.telegram.org is ready.
+    Without retries the process crashes and relies on a Docker restart to get a
+    second chance; retrying here makes startup deterministic.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            await call()
+            return
+        except TelegramRetryAfter as exc:
+            delay = float(exc.retry_after)
+        except (TelegramNetworkError, TelegramServerError):
+            delay = base_delay * (2 ** (attempt - 1))
+        if attempt >= attempts:
+            raise
+        logger.warning(
+            "Telegram API vaqtincha javob bermadi; urinish %s/%s, %s s dan keyin qayta",
+            attempt,
+            attempts,
+            delay,
+        )
+        await asyncio.sleep(delay)
+
+
 class PollingDispatcher(Dispatcher):
     @classmethod
     async def _listen_updates(
@@ -98,6 +127,8 @@ class PollingDispatcher(Dispatcher):
                 )
                 await asyncio.sleep(delay)
                 continue
+            if failures:
+                logger.info("Соединение опроса восстановлено")
             failures = 0
             for update in updates:
                 yield update
@@ -155,7 +186,7 @@ def create_dispatcher(
 
     @fallback.callback_query()
     async def stale(callback: CallbackQuery) -> None:
-        text = "Кнопка устарела или недействительна. Продолжи с помощью /start."
+        text = tr("stale_button")
         if isinstance(callback.message, Message):
             await callback.message.answer(text)
         else:
@@ -163,7 +194,7 @@ def create_dispatcher(
 
     @fallback.message()
     async def unknown(message: Message) -> None:
-        await message.answer("Выбери пункт меню или отправь /start. /cancel — отмена.")
+        await message.answer(tr("unknown_message"))
 
     @fallback.my_chat_member()
     async def membership(event: ChatMemberUpdated) -> None:
@@ -177,6 +208,20 @@ def create_dispatcher(
 
     dispatcher.include_router(fallback)
     return dispatcher
+
+
+def bot_commands(language: str | None = None) -> list[BotCommand]:
+    """Command menu localized through the lexicon for one Telegram client language."""
+    return [
+        BotCommand(command="start", description=tr("cmd_start", language)),
+        BotCommand(command="help", description=tr("cmd_help", language)),
+        BotCommand(command="privacy", description=tr("cmd_privacy", language)),
+        BotCommand(command="terms", description=tr("cmd_terms", language)),
+        BotCommand(command="paysupport", description=tr("cmd_paysupport", language)),
+        BotCommand(command="cancel", description=tr("cmd_cancel", language)),
+        BotCommand(command="id", description=tr("cmd_id", language)),
+        BotCommand(command="delete", description=tr("cmd_delete", language)),
+    ]
 
 
 async def run(settings: Settings) -> int:
@@ -216,21 +261,18 @@ async def run(settings: Settings) -> int:
             return 2
         if not await verify_redis_connection(storage):
             return 2
-        await bot.set_my_commands(
-            [
-                BotCommand(command="start", description="Меню и регистрация"),
-                BotCommand(command="help", description="Помощь"),
-                BotCommand(command="privacy", description="Конфиденциальность"),
-                BotCommand(command="terms", description="Условия покупки Premium"),
-                BotCommand(command="paysupport", description="Поддержка по платежам"),
-                BotCommand(command="cancel", description="Отменить действие"),
-                BotCommand(command="id", description="Мой Telegram ID"),
-                BotCommand(command="delete", description="Удалить анкету"),
-            ]
-        )
+        # Command menu follows the Telegram client language; default covers the rest.
+        await retry_telegram(lambda: bot.set_my_commands(bot_commands(DEFAULT_LANGUAGE)))
+        for language in LANGUAGES:
+            if language != DEFAULT_LANGUAGE:
+                await retry_telegram(
+                    lambda lang=language: bot.set_my_commands(
+                        bot_commands(lang), language_code=lang
+                    )
+                )
         # Keep pending updates. Never drop registration decisions on startup.
-        await bot.delete_webhook(drop_pending_updates=False)
-        logger.info("Запускается опрос Telegram для бота знакомств")
+        await retry_telegram(lambda: bot.delete_webhook(drop_pending_updates=False))
+        logger.info("Bot ishga tushdi: Telegram bilan aloqa o'rnatildi, polling boshlanadi")
         notification_task = asyncio.create_task(payment_notification_loop(bot, store))
         await dispatcher.start_polling(
             bot,

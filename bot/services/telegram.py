@@ -14,6 +14,7 @@ from aiogram.exceptions import (
 )
 
 from bot.db.models import Profile
+from bot.i18n import tr
 from bot.keyboards.common import inline
 from bot.services.store import Decision, Store
 from bot.services.validation import RuleError
@@ -21,12 +22,16 @@ from bot.services.validation import RuleError
 logger = logging.getLogger(__name__)
 
 
-def caption(profile: Profile, show_badge: bool = False) -> str:
+def caption(profile: Profile, show_badge: bool = False, language: str | None = None) -> str:
     # Visible text stays below the caption limit; escaping prevents HTML injection.
     distance = getattr(profile, "distance_km", None)
-    location = f"📍 {distance:g} км от тебя" if distance is not None else "📍 Геолокация"
+    location = (
+        tr("caption_distance", language, distance=f"{distance:g}")
+        if distance is not None
+        else tr("caption_no_location", language)
+    )
     if profile.latitude is None or profile.longitude is None:
-        location = f"📍 {escape(profile.city)}"
+        location = tr("caption_city", language, city=escape(profile.city))
     badge = " 💎" if show_badge else ""
     parts = [f"<b>{escape(profile.name)}, {profile.age}</b>{badge}\n{location}"]
     if profile.bio:
@@ -58,18 +63,20 @@ async def notify_decision(
     if not result.created or kind != "like":
         return
     if result.match_id:
-        keyboard = inline((("💜 Посмотреть анкету", f"match:{result.match_id}", "primary"),))
         recipients = [actor_telegram_id]
         if result.recipient_telegram_id is not None:
             recipients.append(result.recipient_telegram_id)
         for recipient in recipients:
+            language = await store.language_of(recipient)
+            keyboard = inline(
+                ((tr("view_profile", language), f"match:{result.match_id}", "primary"),)
+            )
             await safe_call(
                 store,
                 recipient,
-                lambda recipient=recipient: bot.send_message(
+                lambda recipient=recipient, keyboard=keyboard, language=language: bot.send_message(
                     recipient,
-                    "<b>У вас взаимная симпатия! 💜</b>\n\n"
-                    "Открой контакт, чтобы познакомиться поближе.",
+                    tr("match_notify", language),
                     reply_markup=keyboard,
                 ),
             )
@@ -77,14 +84,14 @@ async def notify_decision(
         recipient = result.recipient_telegram_id
         if recipient is None:
             return
+        language = await store.language_of(recipient)
         await safe_call(
             store,
             recipient,
             lambda: bot.send_message(
                 recipient,
-                "<b>💌 Кому-то понравилась твоя анкета</b>\n\n"
-                "Посмотри входящие лайки — возможно, симпатия взаимна.",
-                reply_markup=inline((("💌 Посмотреть лайки", "incoming", "primary"),)),
+                tr("like_notify", language),
+                reply_markup=inline(((tr("view_likes", language), "incoming", "primary"),)),
             ),
         )
 
@@ -107,5 +114,5 @@ async def contact_url(bot: Bot, store: Store, actor: int, match_id: int) -> str 
 
 def target_id(value: str) -> int:
     if not value.isascii() or not value.isdecimal() or not 0 < int(value) <= 2**63 - 1:
-        raise RuleError("Кнопка устарела или недействительна.")
+        raise RuleError(tr("err_invalid_button"))
     return int(value)

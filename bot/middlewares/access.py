@@ -13,8 +13,7 @@ from aiogram.exceptions import (
 )
 from aiogram.types import CallbackQuery, Message, TelegramObject
 
-from bot import texts
-from bot.i18n import current_language
+from bot.i18n import current_language, tr
 from bot.keyboards.common import inline
 from bot.services.store import Store
 from bot.services.telegram import safe_call
@@ -75,16 +74,18 @@ class AccessMiddleware(BaseMiddleware):
                 "lang:uz",
                 "lang:ru",
                 "lang:en",
+                "lang:kg",
+                "settings:language",
             }
             payment_event = isinstance(message, Message) and bool(
                 message.successful_payment or message.refunded_payment
             )
             if user.is_banned and command not in allowed and not payment_event:
-                raise RuleError("Твой доступ ограничен. Доступны /help, /privacy и /delete.")
+                raise RuleError(tr("err_banned"))
             if callback and command.startswith("react:"):
                 now = time.monotonic()
                 if now - self.last_decision.get(telegram_id, 0) < 1:
-                    raise RuleError("Подожди секунду и нажми снова.")
+                    raise RuleError(tr("err_rate_limit"))
                 self.last_decision[telegram_id] = now
                 if len(self.last_decision) > 10_000:
                     self.last_decision = {
@@ -100,7 +101,7 @@ class AccessMiddleware(BaseMiddleware):
                     telegram_id,
                     error_text,
                     parse_mode=None,
-                    reply_markup=inline((("🏠 В меню", "home"),)),
+                    reply_markup=inline(((tr("back_menu"), "home"),)),
                 ),
             )
         except TelegramForbiddenError:
@@ -115,8 +116,7 @@ class AccessMiddleware(BaseMiddleware):
                 telegram_id,
                 lambda: data["bot"].send_message(
                     telegram_id,
-                    "Не получилось отправить сообщение или фото. Попробуй ещё раз. "
-                    "Если фото устарело, обнови его в разделе «Моя анкета».",
+                    tr("message_send_failed"),
                 ),
             )
         except (TelegramNetworkError, TelegramServerError, TimeoutError, OSError):
@@ -124,13 +124,13 @@ class AccessMiddleware(BaseMiddleware):
             await safe_call(
                 self.store,
                 telegram_id,
-                lambda: data["bot"].send_message(telegram_id, texts.TEMPORARY_ERROR),
+                lambda: data["bot"].send_message(telegram_id, tr("temporary_error")),
             )
         except Exception:
             logger.exception("Непредвиденная ошибка при обработке обновления")
             await safe_call(
                 self.store,
                 telegram_id,
-                lambda: data["bot"].send_message(telegram_id, texts.TEMPORARY_ERROR),
+                lambda: data["bot"].send_message(telegram_id, tr("temporary_error")),
             )
         return None

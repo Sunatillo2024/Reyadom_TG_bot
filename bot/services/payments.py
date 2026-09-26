@@ -7,6 +7,7 @@ from secrets import token_hex
 from sqlalchemy import func, select
 
 from bot.db.models import PremiumGrant, PremiumOrder, PremiumPayment, User
+from bot.i18n import tr
 from bot.services.premium import PREMIUM_PLANS
 from bot.services.store import Store
 from bot.services.validation import RuleError
@@ -63,7 +64,7 @@ def payload_order_id(payload: str) -> str | None:
 def plan_duration(plan_code: str) -> tuple[int, str]:
     plan = PREMIUM_PLANS.get(plan_code)
     if not plan:
-        raise RuleError("Недействительный тариф Premium.")
+        raise RuleError(tr("err_invalid_tariff"))
     if "duration_days" in plan:
         return int(plan["duration_days"]), "days"
     return int(plan["duration_months"]), "months"
@@ -82,13 +83,13 @@ class PaymentService:
         now: datetime | None = None,
     ) -> PremiumOrder:
         if not self.store.stars_sales_enabled:
-            raise RuleError("Новые покупки Premium временно приостановлены.")
+            raise RuleError(tr("err_sales_paused"))
         duration_value, duration_unit = plan_duration(plan_code)
         now = now or datetime.now(UTC)
         async with self.store.db.sessions.begin() as session:
             user = await session.scalar(select(User).where(User.id == user_id).with_for_update())
             if not user or user.telegram_id != telegram_id or user.is_banned:
-                raise RuleError("Покупка Premium сейчас недоступна.")
+                raise RuleError(tr("err_purchase_unavailable"))
             existing = await session.scalar(
                 select(PremiumOrder)
                 .where(
@@ -127,16 +128,16 @@ class PaymentService:
                 select(PremiumOrder).where(PremiumOrder.id == order_id).with_for_update()
             )
             if not order or order.buyer_telegram_id != telegram_id:
-                raise RuleError("Заказ не найден или принадлежит другому пользователю.")
+                raise RuleError(tr("err_order_not_found_owner"))
             if order.status in {"completed", "refunded", "review"}:
-                raise RuleError("Этот заказ уже закрыт. Выбери тариф заново.")
+                raise RuleError(tr("err_order_closed"))
             if order.expires_at <= now:
-                raise RuleError("Время ожидания заказа истекло. Выбери тариф заново.")
+                raise RuleError(tr("err_order_expired"))
             if not self.store.stars_sales_enabled:
-                raise RuleError("Новые покупки Premium временно приостановлены.")
+                raise RuleError(tr("err_sales_paused"))
             user = await session.get(User, order.user_id)
             if not user or user.is_banned:
-                raise RuleError("Покупка Premium сейчас недоступна.")
+                raise RuleError(tr("err_purchase_unavailable"))
             if order.status == "invoice_sent" and order.invoice_message_id:
                 return order, "already_sent"
             if order.status == "invoice_sending" and order.updated_at > now - INVOICE_CLAIM_TTL:
@@ -171,31 +172,31 @@ class PaymentService:
     ) -> tuple[bool, str | None]:
         order_id = payload_order_id(payload)
         if not order_id:
-            return False, "Неизвестный заказ. Создай новый счёт в разделе Premium."
+            return False, tr("err_unknown_order")
         now = datetime.now(UTC)
         async with self.store.db.sessions.begin() as session:
             order = await session.scalar(
                 select(PremiumOrder).where(PremiumOrder.id == order_id).with_for_update()
             )
             if not order:
-                return False, "Заказ не найден. Создай новый счёт в разделе Premium."
+                return False, tr("err_order_no_invoice")
             if order.buyer_telegram_id != telegram_id:
-                return False, "Этот счёт создан для другого пользователя."
+                return False, tr("err_invoice_other_user")
             if order.currency != currency or order.price_stars != amount:
                 order.status = "review"
                 order.last_error = "pre_checkout_amount_mismatch"
-                return False, "Сумма счёта не совпала с заказом. Оплата остановлена."
+                return False, tr("err_invoice_amount")
             if order.status not in {"invoice_sent", "invoice_sending", "checkout"}:
-                return False, "Заказ уже закрыт или ещё не готов к оплате."
+                return False, tr("err_invoice_not_ready")
             if order.terms_accepted_at is None:
-                return False, "Сначала подтверди условия покупки в боте."
+                return False, tr("err_confirm_terms_first")
             if order.expires_at <= now:
-                return False, "Время ожидания счёта истекло. Создай новый заказ."
+                return False, tr("err_invoice_expired")
             if not self.store.stars_sales_enabled:
-                return False, "Новые покупки Premium временно приостановлены."
+                return False, tr("err_sales_paused")
             user = await session.get(User, order.user_id)
             if not user or user.is_banned:
-                return False, "Покупка Premium сейчас недоступна."
+                return False, tr("err_purchase_unavailable")
             order.status = "checkout"
             order.last_error = None
             return True, None
@@ -380,7 +381,7 @@ class PaymentService:
         async with self.store.db.sessions() as session:
             order = await session.get(PremiumOrder, order_id)
             if not order:
-                raise RuleError("Заказ не найден.")
+                raise RuleError(tr("err_order_not_found"))
             payment = await session.scalar(
                 select(PremiumPayment)
                 .where(PremiumPayment.order_id == order_id)
@@ -392,7 +393,7 @@ class PaymentService:
     async def order_page(self, admin_id: int, page: int) -> list[PremiumOrder]:
         self.store.require_admin(admin_id)
         if not 0 <= page <= 100_000:
-            raise RuleError("Недопустимая страница.")
+            raise RuleError(tr("err_invalid_page"))
         async with self.store.db.sessions() as session:
             return list(
                 await session.scalars(
@@ -416,7 +417,7 @@ class PaymentService:
                 .with_for_update()
             )
             if not order or not payment or payment.status != "completed":
-                raise RuleError("Для этого заказа нет платежа, доступного к возврату.")
+                raise RuleError(tr("err_no_refundable_payment"))
             order.status = "refund_pending"
             payment.status = "refund_pending"
             return payment

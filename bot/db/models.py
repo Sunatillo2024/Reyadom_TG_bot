@@ -29,9 +29,7 @@ class User(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True)
     username: Mapped[str | None] = mapped_column(String(64))
-    language: Mapped[str] = mapped_column(
-        String(2), default="ru", server_default="ru", nullable=False
-    )
+    language: Mapped[str | None] = mapped_column(String(2), default=None, nullable=True)
     is_banned: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
     premium_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     trial_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -43,10 +41,15 @@ class User(Base):
     show_premium_badge: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default=text("true")
     )
+    # One-time 18+/consent acceptance. Lives on the user row (not the profile)
+    # so the screens never reappear after an anketa is deleted.
+    consent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     __table_args__ = (
         CheckConstraint("telegram_id > 0", name="ck_user_telegram_id"),
-        CheckConstraint("language IN ('ru', 'uz', 'en')", name="ck_user_language"),
+        CheckConstraint(
+            "language IS NULL OR language IN ('ru', 'uz', 'en', 'kg')", name="ck_user_language"
+        ),
         CheckConstraint(
             "trial_started_at IS NULL OR trial_ends_at > trial_started_at",
             name="ck_user_trial_period",

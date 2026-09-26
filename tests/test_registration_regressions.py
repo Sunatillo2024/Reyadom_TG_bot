@@ -1,9 +1,9 @@
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
-from aiogram.types import Chat, Message
+from aiogram.types import CallbackQuery, Chat, Message, PhotoSize, ReplyKeyboardMarkup
 from aiogram.types import User as TelegramUser
 from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
@@ -50,6 +50,106 @@ async def test_profile_save_accepts_json_serialized_consent_timestamp(store):
 
     assert await store.save_profile(user.id, draft)
     assert (await store.profile(user.id)).consent_at.tzinfo is not None
+
+
+async def test_profile_save_inherits_recorded_consent_when_draft_lacks_it(store):
+    """Resumed anketa drafts skip the consent screens, so the user-row flag must
+    satisfy the final save instead of rejecting a complete anketa."""
+    user = await store.sync_user(810_011, "resumed_consent")
+    await store.record_consent(user.id)
+    draft = profile_draft()
+    draft.pop("consent_at")
+
+    assert await store.save_profile(user.id, draft)
+    saved = await store.profile(user.id)
+    assert saved is not None and saved.photo_file_id == "telegram-photo-id"
+    assert saved.consent_at.tzinfo is not None
+
+
+async def test_confirm_recovers_photo_from_preview_when_fsm_lost_it():
+    from aiogram.fsm.context import FSMContext
+    from aiogram.fsm.storage.base import StorageKey
+    from aiogram.fsm.storage.memory import MemoryStorage
+
+    from bot.handlers.registration import save
+    from bot.states import Registration
+
+    storage = MemoryStorage()
+    user_id = 810_014
+    state = FSMContext(
+        storage=storage,
+        key=StorageKey(bot_id=1, chat_id=user_id, user_id=user_id),
+    )
+    await state.set_state(Registration.preview)
+    await state.set_data(
+        {
+            "name": "Malika",
+            "age": 25,
+            "gender": "female",
+            "seeking": "any",
+            "city": "Bishkek",
+            "bio": "Salom",
+            "consent_at": datetime.now(UTC).isoformat(),
+            "photo_file_id": None,
+        }
+    )
+    message = Message(
+        message_id=1,
+        date=datetime.now(UTC),
+        chat=Chat(id=user_id, type="private"),
+        from_user=TelegramUser(id=user_id, is_bot=False, first_name="Test"),
+        photo=[PhotoSize(file_id="preview-photo", file_unique_id="unique", width=640, height=640)],
+    )
+    callback = CallbackQuery(
+        id="confirm",
+        from_user=message.from_user,
+        chat_instance="test",
+        message=message,
+        data="reg:save",
+    )
+    store = SimpleNamespace(save_profile=AsyncMock())
+    with patch.object(Message, "answer", new_callable=AsyncMock) as answer:
+        await save(callback, state, store, SimpleNamespace(id=user_id))
+
+    assert store.save_profile.await_args.args[0] == user_id
+    assert store.save_profile.await_args.args[1]["photo_file_id"] == "preview-photo"
+    assert await state.get_data() == {}
+    assert isinstance(answer.await_args.kwargs["reply_markup"], ReplyKeyboardMarkup)
+
+
+async def test_continue_registration_seeds_recorded_consent(store):
+    from aiogram.fsm.context import FSMContext
+    from aiogram.fsm.storage.base import StorageKey
+    from aiogram.fsm.storage.memory import MemoryStorage
+
+    from bot.handlers.registration import continue_registration
+    from bot.states import Registration
+
+    username = "resumed_state"
+    user = await store.sync_user(810_013, username)
+    await store.record_consent(user.id)
+    user = await store.sync_user(user.telegram_id, username)
+    assert user.consent_at is not None
+
+    state = FSMContext(
+        storage=MemoryStorage(),
+        key=StorageKey(bot_id=1, chat_id=user.telegram_id, user_id=user.telegram_id),
+    )
+    message = SimpleNamespace(answer=AsyncMock())
+    await continue_registration(message, state, user)
+
+    assert (await state.get_data())["consent_at"] == user.consent_at.isoformat()
+    assert await state.get_state() == Registration.name.state
+
+
+async def test_profile_save_still_requires_photo_without_consent(store):
+    user = await store.sync_user(810_012, "no_consent")
+    draft = profile_draft()
+    draft.pop("consent_at")
+
+    with pytest.raises(RuleError):
+        await store.save_profile(user.id, draft)
+    assert await store.profile(user.id) is None
 
 
 async def test_profile_save_replaces_legacy_orphan_photo(store):

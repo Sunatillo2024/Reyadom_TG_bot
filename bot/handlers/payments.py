@@ -13,7 +13,7 @@ from aiogram.types import (
     TransactionPartnerUser,
 )
 
-from bot import texts
+from bot.i18n import tr
 from bot.keyboards.common import inline
 from bot.services.payments import (
     STARS_CURRENCY,
@@ -21,7 +21,7 @@ from bot.services.payments import (
     PaymentService,
     order_payload,
 )
-from bot.services.premium import PREMIUM_PLANS
+from bot.services.premium import plan_label
 from bot.services.store import Store
 from bot.services.validation import RuleError
 
@@ -38,13 +38,16 @@ async def deliver_payment_notification(bot: Bot, service: PaymentService, order_
     if not data:
         return False
     telegram_id, premium_until = data
+    language = await service.store.language_of(telegram_id)
     try:
         await bot.send_message(
             telegram_id,
-            "<b>✅ Оплата получена — Premium активирован</b>\n\n"
-            f"Заказ: <code>{short_order(order_id)}</code>\n"
-            f"Доступ действует до: <b>{premium_until.strftime('%d.%m.%Y %H:%M UTC')}</b>\n\n"
-            "Спасибо! Управлять Premium можно через кнопку 💎 Premium.",
+            tr(
+                "payment_success",
+                language,
+                order=short_order(order_id),
+                until=premium_until.strftime("%d.%m.%Y %H:%M UTC"),
+            ),
         )
     except TelegramAPIError as exc:
         await service.mark_notification_error(order_id, type(exc).__name__)
@@ -59,7 +62,7 @@ async def deliver_payment_notification(bot: Bot, service: PaymentService, order_
 async def payment_terms(event: Message | CallbackQuery) -> None:
     message = event.message if isinstance(event, CallbackQuery) else event
     if isinstance(message, Message):
-        await message.answer(texts.PAYMENT_TERMS)
+        await message.answer(tr("payment_terms"))
 
 
 @router.callback_query(F.data.startswith("pay:confirm:"))
@@ -70,31 +73,26 @@ async def confirm_invoice(callback: CallbackQuery, bot: Bot, store: Store) -> No
     service = PaymentService(store)
     order, action = await service.claim_invoice(order_id, callback.from_user.id)
     if action == "already_sent":
-        await callback.message.answer("Счёт уже отправлен выше. Открой его и нажми кнопку оплаты.")
+        await callback.message.answer(tr("invoice_already_sent"))
         return
     if action == "sending":
-        await callback.message.answer("Счёт уже создаётся. Подожди несколько секунд.")
+        await callback.message.answer(tr("invoice_sending"))
         return
-    plan = PREMIUM_PLANS[order.plan_code]
+    label = plan_label(order.plan_code)
     try:
         invoice = await bot.send_invoice(
             chat_id=callback.from_user.id,
-            title=f"Premium «Рядом»: {plan['label']}",
-            description=(
-                f"Разовая покупка Premium на {plan['label']}. Без автосписания и автопродления."
-            ),
+            title=tr("invoice_title", plan=label),
+            description=tr("invoice_description", plan=label),
             payload=order_payload(order.id),
             provider_token="",
             currency=STARS_CURRENCY,
-            prices=[LabeledPrice(label=f"Premium на {plan['label']}", amount=order.price_stars)],
+            prices=[LabeledPrice(label=tr("invoice_label", plan=label), amount=order.price_stars)],
             start_parameter=f"premium-{order.id[:16]}",
         )
     except TelegramAPIError as exc:
         await service.mark_invoice_error(order.id, type(exc).__name__)
-        await callback.message.answer(
-            "Не удалось отправить счёт. Покупка не состоялась, Stars не списаны. "
-            "Попробуй нажать кнопку оплаты ещё раз."
-        )
+        await callback.message.answer(tr("invoice_error"))
         return
     await service.mark_invoice_sent(order.id, invoice.message_id)
 
@@ -110,7 +108,7 @@ async def pre_checkout(query: PreCheckoutQuery, store: Store) -> None:
         )
     except Exception:
         logger.exception("Ошибка короткой проверки платежа")
-        ok, error = False, "Не удалось проверить заказ. Попробуй создать новый счёт."
+        ok, error = False, tr("err_checkout_failed")
     await query.answer(ok=ok, error_message=error)
 
 
@@ -134,10 +132,7 @@ async def successful_payment(message: Message, bot: Bot, store: Store) -> None:
     if result.status == "completed" and result.order_id:
         await deliver_payment_notification(bot, PaymentService(store), result.order_id)
     elif result.status == "review":
-        await message.answer(
-            "Платёж получен, но параметры требуют проверки. Premium не начислен автоматически. "
-            "Отправь /paysupport — администратор увидит платёж."
-        )
+        await message.answer(tr("payment_review"))
 
 
 @router.message(F.refunded_payment)
@@ -154,11 +149,7 @@ async def refunded_payment(message: Message, store: Store) -> None:
         refunded_at=message.date,
     )
     if result.status == "refunded":
-        await message.answer(
-            "<b>Возврат Stars учтён</b>\n\n"
-            "Доступ по возвращённой покупке скорректирован. Другие покупки и "
-            "административные выдачи сохранены."
-        )
+        await message.answer(tr("refund_ack"))
 
 
 @router.message(Command("paysupport"))
@@ -170,30 +161,27 @@ async def payment_support(message: Message, bot: Bot, store: Store) -> None:
     order = await PaymentService(store).order_for_user(message.from_user.id)
     if requested and order and not order.id.startswith(requested):
         order = await PaymentService(store).order_for_user(message.from_user.id, requested)
-    order_text = short_order(order.id) if order else "не найден"
-    notice = (
-        "<b>💳 Обращение по оплате</b>\n"
-        f"Пользователь: <code>{message.from_user.id}</code>\n"
-        f"Заказ: <code>{order_text}</code>\n"
-        f"Статус: {order.status if order else 'нет заказа'}"
-    )
+    order_text = short_order(order.id) if order else tr("paysupport_none")
+    status_text = order.status if order else tr("paysupport_no_order")
     delivered = 0
     for admin_id in store.admin_ids:
+        language = await store.language_of(admin_id)
+        notice = tr(
+            "paysupport_admin",
+            language,
+            telegram_id=message.from_user.id,
+            order=order_text,
+            status=status_text,
+        )
         try:
             await bot.send_message(admin_id, notice)
             delivered += 1
         except TelegramAPIError:
             logger.warning("Не доставлено обращение одному из администраторов")
     if delivered:
-        await message.answer(
-            f"Обращение по заказу <code>{order_text}</code> передано администраторам. "
-            "Они проверят оплату и при необходимости выполнят возврат Stars."
-        )
+        await message.answer(tr("paysupport_sent", order=order_text))
     else:
-        await message.answer(
-            "Не удалось доставить обращение администраторам. Попробуй позже. "
-            f"Сохрани номер заказа: <code>{order_text}</code>."
-        )
+        await message.answer(tr("paysupport_failed", order=order_text))
 
 
 @router.message(Command("payments"))
@@ -216,13 +204,13 @@ async def show_order_page(message: Message, store: Store, admin_id: int, page: i
     ]
     navigation = []
     if page:
-        navigation.append(("← Назад", f"payadmin:list:{page - 1}"))
+        navigation.append((tr("matches_prev"), f"payadmin:list:{page - 1}"))
     if len(orders) == 5:
-        navigation.append(("Далее →", f"payadmin:list:{page + 1}"))
+        navigation.append((tr("matches_next"), f"payadmin:list:{page + 1}"))
     if navigation:
         rows.append(tuple(navigation))
     await message.answer(
-        f"<b>💳 Заказы Premium</b>\nСтраница {page + 1}",
+        tr("payadmin_title", page=page + 1),
         reply_markup=inline(*rows),
     )
 
@@ -234,7 +222,7 @@ async def payment_admin_callback(callback: CallbackQuery, bot: Bot, store: Store
     store.require_admin(callback.from_user.id)
     parts = callback.data.split(":", 2)
     if len(parts) != 3:
-        raise RuleError("Недействительная кнопка платежа.")
+        raise RuleError(tr("err_invalid_payment_button"))
     action, value = parts[1:]
     service = PaymentService(store)
     if action == "list":
@@ -244,39 +232,44 @@ async def payment_admin_callback(callback: CallbackQuery, bot: Bot, store: Store
     if action == "open":
         refund_button = ()
         if payment and payment.status == "completed":
-            refund_button = (("Вернуть Stars", f"payadmin:refund:{order.id}", "danger"),)
+            refund_button = ((tr("refund_button"), f"payadmin:refund:{order.id}", "danger"),)
         await callback.message.answer(
-            "<b>💳 Заказ Premium</b>\n"
-            f"Номер: <code>{short_order(order.id)}</code>\n"
-            f"Пользователь: <code>{order.buyer_telegram_id}</code>\n"
-            f"Тариф: {order.plan_code}\n"
-            f"Сумма: {order.price_stars} {order.currency}\n"
-            f"Статус заказа: {order.status}\n"
-            f"Статус платежа: {payment.status if payment else 'нет'}",
+            tr(
+                "payadmin_order",
+                order=short_order(order.id),
+                buyer=order.buyer_telegram_id,
+                plan=order.plan_code,
+                price=order.price_stars,
+                currency=order.currency,
+                status=order.status,
+                payment_status=payment.status if payment else tr("payadmin_no_payment"),
+            ),
             reply_markup=inline(
                 refund_button,
-                (("💳 К заказам", "payadmin:list:0"),),
+                ((tr("payadmin_back"), "payadmin:list:0"),),
             )
             if refund_button
-            else inline((("💳 К заказам", "payadmin:list:0"),)),
+            else inline(((tr("payadmin_back"), "payadmin:list:0"),)),
         )
         return
     if action == "refund":
         if not payment or payment.status != "completed":
-            raise RuleError("Этот платёж нельзя вернуть.")
+            raise RuleError(tr("err_no_refundable_payment"))
         await callback.message.answer(
-            "<b>Подтверди возврат</b>\n"
-            f"Пользователь: <code>{order.buyer_telegram_id}</code>\n"
-            f"Сумма: <b>{order.price_stars} ⭐️</b>\n"
-            f"Заказ: <code>{short_order(order.id)}</code>",
+            tr(
+                "refund_confirm_prompt",
+                buyer=order.buyer_telegram_id,
+                price=order.price_stars,
+                order=short_order(order.id),
+            ),
             reply_markup=inline(
-                (("Да, вернуть Stars", f"payadmin:confirmrefund:{order.id}", "danger"),),
-                (("Отмена", f"payadmin:open:{order.id}"),),
+                ((tr("refund_yes"), f"payadmin:confirmrefund:{order.id}", "danger"),),
+                ((tr("delete_cancel"), f"payadmin:open:{order.id}"),),
             ),
         )
         return
     if action != "confirmrefund":
-        raise RuleError("Недействительное действие с платежом.")
+        raise RuleError(tr("err_invalid_payment_action"))
     payment = await service.mark_refund_pending(callback.from_user.id, order.id)
     try:
         refunded = await bot.refund_star_payment(
@@ -285,13 +278,11 @@ async def payment_admin_callback(callback: CallbackQuery, bot: Bot, store: Store
         )
     except TelegramAPIError as exc:
         await service.mark_refund_unknown(payment.telegram_payment_charge_id, type(exc).__name__)
-        await callback.message.answer(
-            "Результат возврата неизвестен. Не повторяй его вслепую: запусти /stars_reconcile."
-        )
+        await callback.message.answer(tr("refund_unknown"))
         return
     if not refunded:
         await service.mark_refund_unknown(payment.telegram_payment_charge_id, "api_false")
-        raise RuleError("Telegram не подтвердил возврат. Выполни сверку.")
+        raise RuleError(tr("err_refund_not_confirmed"))
     await service.apply_refund(
         telegram_id=order.buyer_telegram_id,
         payload=payment.invoice_payload,
@@ -299,9 +290,7 @@ async def payment_admin_callback(callback: CallbackQuery, bot: Bot, store: Store
         amount=payment.amount,
         charge_id=payment.telegram_payment_charge_id,
     )
-    await callback.message.answer(
-        "<b>Возврат выполнен</b>\nStars возвращены, доступ скорректирован."
-    )
+    await callback.message.answer(tr("refund_done"))
 
 
 @router.message(Command("stars_reconcile"))
@@ -357,6 +346,5 @@ async def reconcile_stars(message: Message, bot: Bot, store: Store) -> None:
     for order in await service.pending_notifications():
         await deliver_payment_notification(bot, service, order.id)
     await message.answer(
-        "<b>Сверка Stars завершена</b>\n"
-        f"Входящие счета: {incoming}\nВозвраты: {refunded}\nПрочие операции: {skipped}"
+        tr("reconcile_done", incoming=incoming, refunded=refunded, skipped=skipped)
     )

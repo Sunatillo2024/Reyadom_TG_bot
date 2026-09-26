@@ -8,6 +8,8 @@ import pytest
 from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramBadRequest
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.base import StorageKey
 from aiogram.fsm.storage.memory import MemoryStorage, SimpleEventIsolation
 from aiogram.methods import AnswerCallbackQuery, GetChat, SendMessage, SendPhoto
 from aiogram.types import (
@@ -20,6 +22,7 @@ from aiogram.types import (
     Location,
     Message,
     PhotoSize,
+    ReplyKeyboardMarkup,
     Update,
     User,
 )
@@ -59,8 +62,8 @@ async def test_full_dispatcher_flow_offline(store, make_user, monkeypatch):
                 chat=cast(Chat, Chat(id=int(method.chat_id), type="private")),
                 text=getattr(method, "text", None),
                 reply_markup=(
-                    cast(InlineKeyboardMarkup, method.reply_markup)
-                    if hasattr(method.reply_markup, "inline_keyboard")
+                    cast(InlineKeyboardMarkup | ReplyKeyboardMarkup, method.reply_markup)
+                    if method.reply_markup is not None
                     else None
                 ),
             )
@@ -131,6 +134,19 @@ async def test_full_dispatcher_flow_offline(store, make_user, monkeypatch):
         await feed(text="/start", group=True)
         assert not calls
         await feed(text="/start")
+        # A brand-new user sees the flag language picker before anything else.
+        welcome = next(method for method in reversed(calls) if isinstance(method, SendMessage))
+        assert {
+            button.callback_data
+            for row in welcome.reply_markup.inline_keyboard
+            for button in row
+        } >= {"lang:uz", "lang:ru", "lang:en", "lang:kg"}
+        await feed(callback="lang:ru")
+        assert await store.language_of(tid) == "ru"
+        await feed(callback="home")
+        # Without an anketa the age-confirmation screen appears (brand-new user).
+        intro = next(method for method in reversed(calls) if isinstance(method, SendMessage))
+        assert "reg:adult" in str(intro.reply_markup)
         await feed(callback="reg:adult")
         await feed(callback="reg:consent")
         assert "Telegram username" in last_text()
@@ -156,11 +172,26 @@ async def test_full_dispatcher_flow_offline(store, make_user, monkeypatch):
         await feed(photo=True)
         assert isinstance(calls[-1], SendPhoto)
         assert await store.profile(user.id) is None
-        await feed(callback="reg:save")
+        registration_state = dispatcher.fsm.get_context(
+            bot=bot, chat_id=tid, user_id=tid
+        )
+        # Reproduce a partially lost FSM draft while retaining all other answers.
+        await registration_state.update_data(photo_file_id=None)
+        await feed(callback="reg:save", photo=True)
         saved = await store.profile(user.id)
         assert saved.name == "Malika" and saved.latitude == 42.8746 and saved.longitude == 74.5698
+        assert saved.photo_file_id == "photo-id"
+        assert isinstance(calls[-1], SendMessage)
+        assert isinstance(calls[-1].reply_markup, ReplyKeyboardMarkup)
+        assert await registration_state.get_data() == {}
         await feed(text="/start")
         assert "Хорошо, что ты здесь" in last_text()
+        # Existing users keep their saved language and never see the picker again.
+        resumed = next(method for method in reversed(calls) if isinstance(method, SendMessage))
+        assert "lang:" not in str(resumed.reply_markup)
+        # Existing anketa: the 18+ and consent screens must never come back.
+        assert "reg:adult" not in str(resumed.reply_markup)
+        assert "reg:consent" not in str(resumed.reply_markup)
 
         # Edits don't touch the saved row until valid input is submitted.
         await feed(callback="edit:name")
@@ -250,11 +281,103 @@ async def test_full_dispatcher_flow_offline(store, make_user, monkeypatch):
         assert "устарела" in last_text()
         await feed(callback="react:bad-id:like:d", actor=stranger.telegram_id)
         assert "недействительна" in last_text()
+
+        # Language changes happen only from Settings and persist to user.language.
+        await feed(callback="settings")
+        await feed(callback="settings:language")
+        await feed(callback="lang:uz")
+        assert await store.language_of(tid) == "uz"
+        await feed(callback="home")
+        assert "Yaxshi, bu yerdasan" in last_text()
+        # Kyrgyz selects and persists the same way, and messages switch to kg.
+        await feed(callback="settings")
+        await feed(callback="settings:language")
+        await feed(callback="lang:kg")
+        assert await store.language_of(tid) == "kg"
+        await feed(callback="home")
+        assert "Бул жерде экениңиз жакшы" in last_text()
         answers = [call for call in calls if isinstance(call, AnswerCallbackQuery)]
         assert len(answers) >= 25
     finally:
         await dispatcher.fsm.close()
         await bot.session.close()
+
+
+async def test_start_routes_by_anketa_presence(store, make_user):
+    """18+/consent is gated by the user row; only brand-new accounts see it."""
+    from bot.handlers.start import start as start_command
+    from bot.i18n import tr
+    from bot.states import Registration
+
+    def context(telegram_id: int) -> FSMContext:
+        return FSMContext(
+            storage=MemoryStorage(),
+            key=StorageKey(bot_id=1, chat_id=telegram_id, user_id=telegram_id),
+        )
+
+    def message() -> SimpleNamespace:
+        return SimpleNamespace(answer=AsyncMock())
+
+    # 1) The lookup runs directly on telegram_id.
+    existing = await make_user()
+    assert await store.profile_exists(existing.telegram_id) is True
+    assert await store.profile_exists(existing.telegram_id + 700_000) is False
+
+    # 2-3) Existing anketa: straight to the main menu, even with stale FSM state.
+    msg, ctx = message(), context(existing.telegram_id)
+    await ctx.set_state(Registration.consent)
+    await start_command(msg, ctx, store, existing)
+    markup = str(msg.answer.call_args.kwargs["reply_markup"])
+    assert msg.answer.call_args.args[0] == tr("home", "ru")
+    assert "reg:adult" not in markup and "reg:consent" not in markup
+    assert "lang:" not in markup
+    assert await ctx.get_state() is None
+
+    # 4) No anketa and no recorded consent: only now the age screen appears.
+    fresh = await store.sync_user(100_951, "fresh_without_anketa")
+    assert fresh.consent_at is None
+    fresh = await store.set_language(fresh.id, "ru")
+    msg, ctx = message(), context(fresh.telegram_id)
+    await start_command(msg, ctx, store, fresh)
+    assert "reg:adult" in str(msg.answer.call_args.kwargs["reply_markup"])
+    assert await ctx.get_state() == Registration.adult.state
+
+
+async def test_deleted_anketa_never_reshows_consent(store, make_user):
+    """Deleting the anketa must not bring back the 18+/consent screens."""
+    from bot.handlers.start import start as start_command
+    from bot.i18n import tr
+    from bot.states import Registration
+
+    def context(telegram_id: int) -> FSMContext:
+        return FSMContext(
+            storage=MemoryStorage(),
+            key=StorageKey(bot_id=1, chat_id=telegram_id, user_id=telegram_id),
+        )
+
+    def message() -> SimpleNamespace:
+        return SimpleNamespace(answer=AsyncMock())
+
+    user = await make_user()
+    await store.set_language(user.id, "ru")
+    # The one-time acceptance lives on the user row (backfilled by save_profile
+    # from the draft), so it survives anketa deletion.
+    user = await store.sync_user(user.telegram_id, user.username)
+    assert user.consent_at is not None
+
+    await store.delete_profile(user.id)
+    assert await store.profile_exists(user.telegram_id) is False
+
+    msg, ctx = message(), context(user.telegram_id)
+    await start_command(msg, ctx, store, user)
+    # The name prompt carries no keyboard; its absence already proves that the
+    # 18+/consent screens were skipped.
+    assert "reply_markup" not in msg.answer.call_args.kwargs
+    assert msg.answer.call_args.args[0] == tr("reg_name_prompt", "ru")
+    assert await ctx.get_state() == Registration.name.state
+
+    # Even the language choice is skipped: a consented user keeps theirs.
+    assert await store.language_of(user.telegram_id) == "ru"
 
 
 async def test_failing_photo_hides_user_and_keeps_saved_profile(store, make_user):

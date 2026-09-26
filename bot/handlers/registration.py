@@ -2,12 +2,12 @@ from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
-from bot import texts
 from bot.db.models import Profile, User, utcnow
+from bot.i18n import tr
 from bot.keyboards.common import genders, inline, location_request, menu
 from bot.services.store import Store
 from bot.services.telegram import caption
-from bot.services.validation import RuleError, age_value, clean_text
+from bot.services.validation import RuleError, age_value, clean_text, normalize_city
 from bot.states import Registration
 
 router = Router(name="registration")
@@ -15,23 +15,44 @@ router = Router(name="registration")
 
 async def request_name(message: Message, state: FSMContext) -> None:
     await state.set_state(Registration.name)
-    await message.answer(
-        "<b>Как тебя зовут?</b>\n"
-        "Напиши имя для анкеты: от 2 до 40 символов.\n\n"
-        "<i>Без контактов и ссылок. /cancel — отмена.</i>"
-    )
+    await message.answer(tr("reg_name_prompt"))
+
+
+async def continue_registration(message: Message, state: FSMContext, user: User) -> None:
+    """Resume anketa creation from the username step, preserving recorded consent.
+
+    The one-time 18+/consent screens are skipped for users who already accepted
+    them, so the draft must inherit the persisted timestamp. Without this the
+    final save would see a photo but no consent and reject a complete anketa.
+    """
+    if user.consent_at is not None:
+        await state.update_data(consent_at=user.consent_at.isoformat())
+    if user.username:
+        await request_name(message, state)
+    else:
+        await state.set_state(Registration.username)
+        await message.answer(
+            tr("username_help"),
+            reply_markup=inline(((tr("reg_retry_username"), "reg:username"),)),
+        )
 
 
 @router.callback_query(Registration.adult, F.data == "reg:adult")
-async def adult(callback: CallbackQuery, state: FSMContext) -> None:
+async def adult(
+    callback: CallbackQuery, state: FSMContext, store: Store, user: User
+) -> None:
     if not isinstance(callback.message, Message):
         return
+    # The 18+/consent acceptance is one-time and lives on the user row, so it
+    # must be recorded before anything else and survives anketa deletion.
+    consent_at = await store.record_consent(user.id)
+    await state.update_data(consent_at=consent_at.isoformat())
     await state.set_state(Registration.consent)
     await callback.message.answer(
-        texts.CONSENT,
+        tr("consent"),
         reply_markup=inline(
-            (("Согласен / согласна", "reg:consent", "success"),),
-            (("Отмена", "home:cancel"),),
+            ((tr("reg_consent_button"), "reg:consent", "success"),),
+            ((tr("delete_cancel"), "home:cancel"),),
         ),
     )
 
@@ -42,13 +63,7 @@ async def consent(callback: CallbackQuery, state: FSMContext, user: User) -> Non
         return
     # Redis FSM storage is JSON-backed, so drafts must only contain JSON values.
     await state.update_data(consent_at=utcnow().isoformat())
-    if user.username:
-        await request_name(callback.message, state)
-    else:
-        await state.set_state(Registration.username)
-        await callback.message.answer(
-            texts.USERNAME_HELP, reply_markup=inline((("Проверить ещё раз", "reg:username"),))
-        )
+    await continue_registration(callback.message, state, user)
 
 
 @router.callback_query(Registration.username, F.data == "reg:username")
@@ -59,7 +74,8 @@ async def username(callback: CallbackQuery, state: FSMContext, user: User) -> No
         await request_name(callback.message, state)
     else:
         await callback.message.answer(
-            texts.USERNAME_HELP, reply_markup=inline((("Проверить ещё раз", "reg:username"),))
+            tr("username_help"),
+            reply_markup=inline(((tr("reg_retry_username"), "reg:username"),)),
         )
 
 
@@ -69,7 +85,7 @@ async def name(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(name=clean_text(message.text, 2, 40))
     await state.set_state(Registration.age)
-    await message.answer("<b>Сколько тебе лет?</b>\nОтправь возраст целым числом от 18 до 99.")
+    await message.answer(tr("reg_age_prompt"))
 
 
 @router.message(Registration.age, F.text)
@@ -78,7 +94,7 @@ async def age(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(age=age_value(message.text))
     await state.set_state(Registration.gender)
-    await message.answer("<b>Укажи свой пол</b>", reply_markup=genders("reg:gender"))
+    await message.answer(tr("reg_gender_prompt"), reply_markup=genders("reg:gender"))
 
 
 @router.callback_query(Registration.gender, F.data.startswith("reg:gender:"))
@@ -87,11 +103,11 @@ async def gender(callback: CallbackQuery, state: FSMContext) -> None:
         return
     value = callback.data.rsplit(":", 1)[-1]
     if value not in {"male", "female"}:
-        raise RuleError("Выбери пол с помощью кнопки.")
+        raise RuleError(tr("err_choose_gender"))
     await state.update_data(gender=value)
     await state.set_state(Registration.seeking)
     await callback.message.answer(
-        "<b>Кого ты ищешь?</b>", reply_markup=genders("reg:seeking", True)
+        tr("reg_seeking_prompt"), reply_markup=genders("reg:seeking", True)
     )
 
 
@@ -101,14 +117,11 @@ async def seeking(callback: CallbackQuery, state: FSMContext) -> None:
         return
     value = callback.data.rsplit(":", 1)[-1]
     if value not in {"male", "female", "any"}:
-        raise RuleError("Нажми одну из кнопок.")
+        raise RuleError(tr("err_choose_button"))
     await state.update_data(seeking=value)
     await state.set_state(Registration.location)
     await callback.message.answer(
-        "<b>Где ты находишься? 📍</b>\n"
-        "Отправь геолокацию кнопкой ниже. Сначала покажем людей ближе к тебе, "
-        "затем — тех, кто дальше.\n\n"
-        "<i>Точные координаты другим пользователям не показываются.</i>",
+        tr("reg_location_prompt"),
         reply_markup=location_request(),
     )
 
@@ -117,29 +130,24 @@ async def seeking(callback: CallbackQuery, state: FSMContext) -> None:
 async def location(message: Message, state: FSMContext) -> None:
     if message.location is None:
         return
+    city = tr("location_city_default")
     await state.update_data(
         latitude=message.location.latitude,
         longitude=message.location.longitude,
-        city="Геолокация",
-        city_normalized="геолокация",
+        city=city,
+        city_normalized=normalize_city(city),
     )
     await state.set_state(Registration.bio)
     await message.answer(
-        "<b>Расскажи о себе</b>\n"
-        "Напиши до 300 символов или пропусти этот шаг.\n\n"
-        "<i>Не указывай @username и ссылки.</i>",
-        reply_markup=inline((("Пропустить", "reg:skip"),)),
+        tr("reg_bio_prompt"),
+        reply_markup=inline(((tr("reg_skip_button"), "reg:skip"),)),
     )
 
 
 async def request_photo(message: Message, state: FSMContext, bio: str) -> None:
     await state.update_data(bio=bio)
     await state.set_state(Registration.photo)
-    await message.answer(
-        "<b>Добавь фотографию</b>\n"
-        "Отправь одно своё фото как фотографию в Telegram.\n\n"
-        "<i>Файл или видео не подойдут.</i>"
-    )
+    await message.answer(tr("reg_photo_prompt"))
 
 
 @router.message(Registration.bio, F.text)
@@ -159,7 +167,7 @@ async def skip(callback: CallbackQuery, state: FSMContext) -> None:
 @router.message(Registration.photo, F.photo)
 async def photo(message: Message, state: FSMContext) -> None:
     if message.media_group_id or not message.photo:
-        raise RuleError("Отправь только одно фото, без альбома.")
+        raise RuleError(tr("err_album_not_allowed"))
     await state.update_data(photo_file_id=message.photo[-1].file_id)
     draft = await state.get_data()
     await state.set_state(Registration.preview)
@@ -167,46 +175,49 @@ async def photo(message: Message, state: FSMContext) -> None:
         draft["photo_file_id"],
         caption=caption(Profile(**draft)),
         reply_markup=inline(
-            (("Подтвердить", "reg:save", "success"),),
-            (("Заполнить заново", "reg:restart"),),
+            ((tr("reg_confirm_button"), "reg:save", "success"),),
+            ((tr("reg_restart_button"), "reg:restart"),),
         ),
     )
 
 
 @router.callback_query(Registration.preview, F.data == "reg:save")
 async def save(callback: CallbackQuery, state: FSMContext, store: Store, user: User) -> None:
-    await store.save_profile(user.id, await state.get_data())
+    draft = await state.get_data()
+    # The button is attached to the preview photo, which is authoritative if
+    # JSON-backed FSM storage lost or retained a stale draft file_id.
+    if isinstance(callback.message, Message) and callback.message.photo:
+        draft["photo_file_id"] = callback.message.photo[-1].file_id
+    await store.save_profile(user.id, draft)
     await state.clear()
     if not isinstance(callback.message, Message):
         return
     await callback.message.answer(
-        "<b>Готово! Анкета создана 💜</b>\n"
-        "Поиск настроен на возраст 18–99 лет. Анкеты будут показаны от ближайших "
-        "к более дальним. Геолокацию можно изменить в настройках.",
+        tr("reg_done"),
         reply_markup=menu(),
     )
 
 
 @router.callback_query(Registration.preview, F.data == "reg:restart")
-async def restart(callback: CallbackQuery, state: FSMContext) -> None:
+async def restart(callback: CallbackQuery, state: FSMContext, user: User) -> None:
     if not isinstance(callback.message, Message):
         return
-    consent_at = (await state.get_data())["consent_at"]
+    # The user-level consent timestamp outranks any stale draft value; a fresh
+    # stamp only covers sessions started before the user-row flag existed.
+    consent_at = (await state.get_data()).get("consent_at")
+    if user.consent_at is not None:
+        consent_at = user.consent_at.isoformat()
+    elif consent_at is None:
+        consent_at = utcnow().isoformat()
     await state.set_data({"consent_at": consent_at})
     await request_name(callback.message, state)
 
 
 @router.message(Registration.photo)
 async def wrong_photo(message: Message) -> None:
-    await message.answer(
-        "Отправь одну фотографию как фото. Видео, файл и текст не подойдут.\n\n"
-        "<i>/cancel — отмена.</i>"
-    )
+    await message.answer(tr("reg_wrong_photo"))
 
 
 @router.message(Registration())
 async def wrong_input(message: Message) -> None:
-    await message.answer(
-        "Ответь на текущий вопрос или нажми подходящую кнопку. "
-        "/cancel — отмена, /start — начать заново."
-    )
+    await message.answer(tr("reg_wrong_input"))

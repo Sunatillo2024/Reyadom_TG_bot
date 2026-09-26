@@ -3,8 +3,8 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InputMediaPhoto, Message
 
-from bot import texts
 from bot.db.models import Profile, User
+from bot.i18n import localized_labels, tr
 from bot.keyboards.common import decisions, home
 from bot.services.store import Store
 from bot.services.telegram import caption, notify_decision, safe_call, target_id
@@ -143,17 +143,16 @@ async def show_next(
 ) -> bool:
     profile = await store.next_profile(user.id, incoming)
     if profile is None:
-        await message.answer(texts.NO_LIKES if incoming else texts.NO_PROFILES, reply_markup=home())
+        await message.answer(tr("no_likes") if incoming else tr("no_profiles"), reply_markup=home())
         return False
     await _show_profile(message, state, profile, incoming, store=store)
     return True
 
 
-@router.message(F.text.in_(texts.MENU_LABEL_ALIASES[0]))
-@router.message(F.text.in_(texts.MENU_LABEL_ALIASES[2]))
+@router.message(F.text.in_(localized_labels("menu_discover") | localized_labels("menu_likes")))
 async def discover(message: Message, state: FSMContext, store: Store, user: User) -> None:
     await state.clear()
-    await show_next(message, state, store, user, message.text in texts.MENU_LABEL_ALIASES[2])
+    await show_next(message, state, store, user, message.text in localized_labels("menu_likes"))
 
 
 @router.callback_query(F.data == "incoming")
@@ -171,7 +170,7 @@ async def undo_pass(callback: CallbackQuery, state: FSMContext, store: Store, us
 
     profile = await store.undo_last_pass(user.id)
     if profile is None:
-        await message.answer("Нет анкеты для возврата. Последняя анкета должна быть пропущена.")
+        await message.answer(tr("no_undo_profile"))
         return
 
     await _show_profile(message, state, profile, False, store=store)
@@ -187,23 +186,23 @@ async def switch_photo(
     parts = callback.data.split(":")
     if len(parts) == 3 and parts[1] == "info":
         # Just info label clicked (e.g., "1/5")
-        await callback.answer(f"Фото {parts[2]}")
+        await callback.answer(tr("photo_counter", position=parts[2]))
         return
 
     if len(parts) != 4:
-        raise RuleError("Кнопка устарела или недействительна.")
+        raise RuleError(tr("err_invalid_button"))
 
     target = target_id(parts[1])
     source = parts[3]
     if not parts[2].isascii() or not parts[2].isdecimal() or source not in {"i", "d"}:
-        raise RuleError("Кнопка устарела или недействительна.")
+        raise RuleError(tr("err_invalid_button"))
     photo_index = int(parts[2])
     if photo_index >= 5 or (await state.get_data()).get(CURRENT_PROFILE_KEY) != target:
-        raise RuleError("Кнопка устарела или недействительна.")
+        raise RuleError(tr("err_invalid_button"))
 
     profile = await store.profile(target)
     if not profile:
-        raise RuleError("Анкета не найдена.")
+        raise RuleError(tr("err_profile_not_found"))
 
     await _show_profile(
         callback.message, state, profile, source == "i", store=store, photo_index=photo_index
@@ -219,11 +218,11 @@ async def react(callback: CallbackQuery, state: FSMContext, store: Store, user: 
     bot = callback.bot
     parts = callback.data.split(":")
     if len(parts) != 4 or parts[3] not in {"i", "d"}:
-        raise RuleError("Кнопка устарела или недействительна.")
+        raise RuleError(tr("err_invalid_button"))
     target, kind, source = target_id(parts[1]), parts[2], parts[3]
     result = await store.decide(user.id, target, kind)
     if not result.created:
-        await callback.message.answer("Твоё решение по этой анкете уже сохранено.")
+        await callback.message.answer(tr("decision_saved"))
         return
     await notify_decision(callback.bot, store, user.telegram_id, result, kind)
     if not await show_next(message, state, store, user, source == "i"):

@@ -97,6 +97,8 @@ docker compose restart bot
 
 `/start` yangi foydalanuvchidan 18+ tasdig'i, rozilik va Telegram username talab qiladi. Keyin ism (2–40), yosh (18–99), jins, kimni qidirishi, Telegram geolokatsiyasi, ixtiyoriy tavsif (300 gacha), bitta Telegram photo va yakuniy tasdiq olinadi. Yosh foydalanuvchining bayonoti; hujjat orqali verifikatsiya qilinmaydi. Username qo'lda yozdirilmaydi.
 
+18+ va rozilik oynalari foydalanuvchiga FAQAT birinchi marta ko'rsatiladi: rozilik `users.consent_at` da doimiy saqlanadi, shuning uchun anketa o'chirilib qayta yaratilsa ham bu qadamlar qaytib chiqmaydi — oqim to'g'ridan-to'g'ri anketa to'ldirishdan davom etadi.
+
 Anketa faqat tasdiqlangach bazaga yoziladi. Qidiruv har ikki tomonning yosh va jins talablarini hisobga oladi. Ikkala foydalanuvchida geolokatsiya bo'lsa, mos anketalar Haversine masofasi bo'yicha eng yaqinidan boshlab ko'rsatiladi; qidiruv radius bilan cheklanmaydi, shuning uchun yaqin odam bo'lmasa uzoqroq profillar ham navbatda chiqadi. Eski shahar bilan yaratilgan profil geolokatsiya yuborilmaguncha faqat boshqa eski profil bilan moslashadi.
 
 Asosiy menyu:

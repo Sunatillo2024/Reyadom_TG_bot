@@ -7,15 +7,23 @@ from typing import Literal
 from dateutil.relativedelta import relativedelta
 
 from bot.db.models import User
+from bot.i18n import tr
 
 # Timezone for daily limits reset. All users share the same reset boundary.
 DAILY_LIMIT_TIMEZONE = "UTC"
 
 # Premium plan definitions
 PREMIUM_PLANS = {
-    "premium_3d": {"duration_days": 3, "price_stars": 200, "label": "3 дня"},
-    "premium_1m": {"duration_months": 1, "price_stars": 500, "label": "1 месяц"},
-    "premium_3m": {"duration_months": 3, "price_stars": 1200, "label": "3 месяца"},
+    "premium_3d": {"duration_days": 3, "price_stars": 200},
+    "premium_1m": {"duration_months": 1, "price_stars": 500},
+    "premium_3m": {"duration_months": 3, "price_stars": 1200},
+}
+
+# Lexicon keys with the localized name of each plan.
+_PLAN_LABEL_KEYS = {
+    "premium_3d": "plan_3d",
+    "premium_1m": "plan_1m",
+    "premium_3m": "plan_3m",
 }
 
 # Capability limits
@@ -27,6 +35,11 @@ BOOST_DURATION_MINUTES = 30
 BOOST_COOLDOWN_HOURS = 24
 
 PlanCode = Literal["premium_3d", "premium_1m", "premium_3m"]
+
+
+def plan_label(plan_code: str, language: str | None = None) -> str:
+    """Return the localized display name of a Premium plan."""
+    return tr(_PLAN_LABEL_KEYS.get(plan_code, "plan_1m"), language)
 
 
 @dataclass(frozen=True)
@@ -125,9 +138,11 @@ def can_send_like(user: User, likes_sent_today: int) -> tuple[bool, str]:
         reset_at = daily_limit_reset_at()
         return (
             False,
-            f"Лимит {FREE_DAILY_LIKES} лайков исчерпан.\n"
-            f"Следующее обновление: {reset_at.strftime('%H:%M')} UTC.\n\n"
-            "💎 Premium снимает лимит лайков.",
+            tr(
+                "err_likes_limit",
+                limit=FREE_DAILY_LIKES,
+                reset_at=reset_at.strftime("%H:%M"),
+            ),
         )
 
     return True, ""
@@ -144,9 +159,11 @@ def can_undo_pass(user: User, undos_today: int, now: datetime | None = None) -> 
         reset_at = daily_limit_reset_at(now)
         return (
             False,
-            f"Возврат анкеты доступен {FREE_DAILY_UNDO} раз в сутки.\n"
-            f"Следующее обновление: {reset_at.strftime('%H:%M')} UTC.\n\n"
-            "💎 Premium снимает лимит возвратов.",
+            tr(
+                "err_undo_limit",
+                limit=FREE_DAILY_UNDO,
+                reset_at=reset_at.strftime("%H:%M"),
+            ),
         )
 
     return True, ""

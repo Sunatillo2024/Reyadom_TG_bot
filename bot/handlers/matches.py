@@ -4,9 +4,8 @@ from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
-from bot import texts
 from bot.db.models import User
-from bot.i18n import tr
+from bot.i18n import localized_labels, tr
 from bot.keyboards.common import inline, match_actions
 from bot.services.store import Store
 from bot.services.telegram import caption, contact_url, target_id
@@ -22,19 +21,19 @@ async def show_matches(message: Message, store: Store, user: User, page: int = 0
     ]
     navigation = []
     if page:
-        navigation.append(("← Назад", f"matches:{page - 1}"))
+        navigation.append((tr("matches_prev"), f"matches:{page - 1}"))
     if len(entries) == 5:
-        navigation.append(("Далее →", f"matches:{page + 1}"))
+        navigation.append((tr("matches_next"), f"matches:{page + 1}"))
     if navigation:
         rows.append(tuple(navigation))
-    rows.append((("🏠 В меню", "home"),))
+    rows.append(((tr("back_menu"), "home"),))
     await message.answer(
         (tr("matches_title_page", page=page + 1) if entries else tr("no_matches")),
         reply_markup=inline(*rows),
     )
 
 
-@router.message(F.text.in_(texts.MENU_LABEL_ALIASES[3]))
+@router.message(F.text.in_(localized_labels("menu_matches")))
 async def match_menu(message: Message, state: FSMContext, store: Store, user: User) -> None:
     await state.clear()
     await show_matches(message, store, user)
@@ -57,7 +56,7 @@ async def match_open(callback: CallbackQuery, store: Store, user: User) -> None:
     target = await store.match_target(user.id, match_id)
     profile = await store.profile(target.id)
     if not profile:
-        raise RuleError("Анкета удалена.")
+        raise RuleError(tr("err_profile_deleted"))
     await callback.message.answer_photo(
         profile.photo_file_id,
         caption=caption(profile),
@@ -72,15 +71,12 @@ async def contact(callback: CallbackQuery, store: Store, user: User) -> None:
     match_id = target_id(callback.data.split(":", 1)[1])
     url = await contact_url(callback.bot, store, user.id, match_id)
     if url:
-        await callback.message.answer(
-            f"<b>💬 Контакт открыт</b>\n{escape(url)}\n\n"
-            "Общение продолжится в личном чате Telegram."
-        )
+        await callback.message.answer(tr("contact_opened", url=escape(url)))
     else:
         await callback.message.answer(
-            "<b>Контакт пока недоступен</b>\n"
-            "Попроси пользователя добавить Telegram username и попробуй ещё раз позже.",
+            tr("contact_unavailable"),
             reply_markup=inline(
-                (("Попробовать снова", f"contact:{match_id}"),), (("🏠 В меню", "home"),)
+                ((tr("contact_retry"), f"contact:{match_id}"),),
+                ((tr("back_menu"), "home"),),
             ),
         )

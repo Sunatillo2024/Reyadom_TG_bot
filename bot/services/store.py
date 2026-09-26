@@ -21,6 +21,7 @@ from bot.db.models import (
     User,
     utcnow,
 )
+from bot.i18n import tr
 from bot.services.premium import (
     BOOST_COOLDOWN_HOURS,
     BOOST_DURATION_MINUTES,
@@ -64,6 +65,7 @@ class TrialNotification:
     kind: str
     trial_started_at: datetime
     trial_ends_at: datetime
+    language: str | None = None
 
 
 def pair_clause(left: Any, right: Any, actor: Any, target: Any):
@@ -110,7 +112,6 @@ class Store:
                 .values(
                     telegram_id=telegram_id,
                     username=username,
-                    language="ru",
                     created_at=registered_at,
                     trial_started_at=trial_started_at,
                     trial_ends_at=trial_ends_at,
@@ -125,7 +126,7 @@ class Store:
                 select(User).where(User.telegram_id == telegram_id).with_for_update()
             )
             if user is None:
-                raise RuleError("Пользователь не найден.")
+                raise RuleError(tr("err_user_not_found"))
             user.username = username
             # Rows must never retain eligibility after their first server-side registration.
             if not user.trial_used:
@@ -187,6 +188,7 @@ class Store:
                             "welcome",
                             user.trial_started_at,
                             user.trial_ends_at,
+                            language=user.language,
                         )
                     )
                 if (
@@ -202,6 +204,7 @@ class Store:
                                 "reminder",
                                 user.trial_started_at,
                                 user.trial_ends_at,
+                                language=user.language,
                             )
                         )
                 if user.trial_expired_sent_at is None and user.trial_ends_at <= claimed_at:
@@ -214,6 +217,7 @@ class Store:
                                 "expired",
                                 user.trial_started_at,
                                 user.trial_ends_at,
+                                language=user.language,
                             )
                         )
             return notifications
@@ -227,26 +231,58 @@ class Store:
     async def _actor(self, session: AsyncSession, actor: int, active: bool = False) -> User:
         user = await session.get(User, actor)
         if not user or user.is_banned:
-            raise RuleError("Доступ ограничен. Доступны /help, /privacy и /delete.")
+            raise RuleError(tr("err_access_limited"))
         if active:
             profile = await session.get(Profile, actor)
             if not profile or not profile.is_active or not user.username:
-                raise RuleError("Сначала создай анкету или снова сделай её видимой.")
+                raise RuleError(tr("err_create_or_show_profile"))
         return user
 
     async def set_language(self, actor: int, language: str) -> User:
-        if language not in {"ru", "uz", "en"}:
-            raise RuleError("Tilni tanlashda xatolik yuz berdi.")
+        if language not in {"ru", "uz", "en", "kg"}:
+            raise RuleError(tr("err_language_invalid"))
         async with self.db.sessions.begin() as session:
             user = await session.get(User, actor)
             if user is None:
-                raise RuleError("Пользователь не найден.")
+                raise RuleError(tr("err_user_not_found"))
             user.language = language
             return user
+
+    async def record_consent(self, actor: int) -> datetime:
+        """Persist the one-time 18+/consent acceptance on the user row.
+
+        Returns the stored timestamp. Idempotent: an already recorded consent
+        is never overwritten, so the 18+/consent screens stay a once-ever step.
+        """
+        async with self.db.sessions.begin() as session:
+            user = await session.scalar(select(User).where(User.id == actor).with_for_update())
+            if user is None:
+                raise RuleError(tr("err_user_not_found"))
+            if user.consent_at is None:
+                user.consent_at = utcnow()
+            return user.consent_at
+
+    async def language_of(self, telegram_id: int) -> str | None:
+        """Return the stored interface language of a Telegram user, if it is set."""
+        async with self.db.sessions() as session:
+            return await session.scalar(
+                select(User.language).where(User.telegram_id == telegram_id)
+            )
 
     async def profile(self, actor: int) -> Profile | None:
         async with self.db.sessions() as session:
             return await session.get(Profile, actor)
+
+    async def profile_exists(self, telegram_id: int) -> bool:
+        """Check for an anketa directly by Telegram id; /start routes on this."""
+        async with self.db.sessions() as session:
+            user_id = await session.scalar(
+                select(Profile.user_id)
+                .join(User, User.id == Profile.user_id)
+                .where(User.telegram_id == telegram_id)
+                .limit(1)
+            )
+        return user_id is not None
 
     async def save_profile(self, actor: int, draft: dict[str, Any]) -> bool:
         """Atomically create a profile; return False when the same save was already applied."""
@@ -254,16 +290,16 @@ class Store:
             # Serialize saves per user so duplicate Telegram updates cannot both insert a profile.
             user = await session.scalar(select(User).where(User.id == actor).with_for_update())
             if not user or user.is_banned:
-                raise RuleError("Доступ ограничен. Доступны /help, /privacy и /delete.")
+                raise RuleError(tr("err_access_limited"))
             if not user.username:
-                raise RuleError("Добавь имя пользователя в настройках Telegram.")
+                raise RuleError(tr("err_add_username"))
             if await session.get(Profile, actor):
                 return False
 
             try:
                 if "latitude" in draft or "longitude" in draft:
                     latitude, longitude = coordinates(draft.get("latitude"), draft.get("longitude"))
-                    city = "Геолокация"
+                    city = tr("location_city_default")
                 else:
                     latitude, longitude = None, None
                     city = clean_text(draft["city"], 2, 60)
@@ -279,25 +315,34 @@ class Store:
                     "longitude": longitude,
                 }
             except KeyError as exc:
-                raise RuleError("Данные анкеты устарели. Начни заново с /start.") from exc
+                raise RuleError(tr("err_profile_stale")) from exc
             if values["gender"] not in {"male", "female"} or values["seeking"] not in {
                 "male",
                 "female",
                 "any",
             }:
-                raise RuleError("Выбери пол с помощью кнопки.")
+                raise RuleError(tr("err_choose_gender"))
             consent_at = draft.get("consent_at")
             if isinstance(consent_at, str):
                 try:
                     consent_at = datetime.fromisoformat(consent_at)
                 except ValueError:
                     consent_at = None
+            if not isinstance(consent_at, datetime) or consent_at.tzinfo is None:
+                # Consent is recorded on the user row and is never asked twice,
+                # so a resumed draft may legitimately lack it. Fall back to the
+                # persisted flag instead of rejecting a complete anketa.
+                consent_at = user.consent_at
             if (
                 not values["photo_file_id"]
                 or not isinstance(consent_at, datetime)
                 or consent_at.tzinfo is None
             ):
-                raise RuleError("Нужны фото и твоё согласие. Начни заново с /start.")
+                raise RuleError(tr("err_photo_and_consent"))
+            # Belt-and-braces: the user-level flag must exist even when the FSM
+            # flow was bypassed (old sessions, drafts saved before migration 0011).
+            if user.consent_at is None:
+                user.consent_at = consent_at
             values["city_normalized"] = normalize_city(values["city"])
 
             # Old releases could leave gallery rows behind after deleting a profile.
@@ -328,17 +373,17 @@ class Store:
         elif field == "photo_file_id" and isinstance(value, str) and value:
             pass
         else:
-            raise RuleError("Недопустимое поле или значение.")
+            raise RuleError(tr("err_invalid_field"))
         async with self.db.sessions.begin() as session:
             if field == "photo_file_id":
                 user = await session.scalar(select(User).where(User.id == actor).with_for_update())
                 if not user or user.is_banned:
-                    raise RuleError("Доступ ограничен. Доступны /help, /privacy и /delete.")
+                    raise RuleError(tr("err_access_limited"))
             else:
                 await self._actor(session, actor)
             profile = await session.get(Profile, actor)
             if not profile:
-                raise RuleError("Анкета не найдена. Отправь /start.")
+                raise RuleError(tr("err_profile_not_found_start"))
             setattr(profile, field, value)
             if field == "city":
                 profile.city_normalized = normalize_city(value)
@@ -380,9 +425,10 @@ class Store:
             await self._actor(session, actor)
             profile = await session.get(Profile, actor)
             if not profile:
-                raise RuleError("Анкета не найдена. Отправь /start.")
+                raise RuleError(tr("err_profile_not_found_start"))
             profile.latitude, profile.longitude = latitude, longitude
-            profile.city, profile.city_normalized = "Геолокация", "геолокация"
+            profile.city = tr("location_city_default")
+            profile.city_normalized = normalize_city(profile.city)
 
     async def settings(self, actor: int, minimum: int, maximum: int, own_city: bool) -> None:
         minimum, maximum = age_range(minimum, maximum)
@@ -390,7 +436,7 @@ class Store:
             await self._actor(session, actor)
             profile = await session.get(Profile, actor)
             if not profile:
-                raise RuleError("Сначала создай анкету: /start")
+                raise RuleError(tr("err_create_profile_start"))
             profile.min_age, profile.max_age = minimum, maximum
             profile.own_city_only = own_city
 
@@ -399,7 +445,7 @@ class Store:
             user = await self._actor(session, actor)
             profile = await session.get(Profile, actor)
             if not profile or (active and not user.username):
-                raise RuleError("Нужны анкета и имя пользователя Telegram.")
+                raise RuleError(tr("err_profile_and_username"))
             profile.is_active = active
 
     async def delete_profile(self, actor: int) -> None:
@@ -547,15 +593,17 @@ class Store:
             reset_at = daily_limit_reset_at(now)
             return (
                 False,
-                f"Лимит {FREE_DAILY_LIKES} лайков исчерпан.\n"
-                f"Следующее обновление: {reset_at.strftime('%H:%M')} UTC.\n\n"
-                "💎 Premium снимает лимит лайков.",
+                tr(
+                    "err_likes_limit",
+                    limit=FREE_DAILY_LIKES,
+                    reset_at=reset_at.strftime("%H:%M"),
+                ),
             )
         return True, ""
 
     async def decide(self, actor: int, target: int, kind: str) -> Decision:
         if kind not in {"like", "pass"} or actor == target:
-            raise RuleError("Недопустимая реакция.")
+            raise RuleError(tr("err_invalid_reaction"))
         async with self.db.sessions.begin() as session:
             # The free daily budget is shared by all of an actor's targets. Pair-level
             # locking alone lets concurrent likes to different users all observe the
@@ -599,7 +647,7 @@ class Store:
                 self._candidates(actor).where(Profile.user_id == target)
             )
             if not eligible:
-                raise RuleError("Эта анкета сейчас недоступна или не соответствует твоим фильтрам.")
+                raise RuleError(tr("err_profile_unavailable"))
             reaction_id = await session.scalar(
                 insert(Reaction)
                 .values(from_user_id=actor, to_user_id=target, kind=kind)
@@ -610,7 +658,7 @@ class Store:
                 return Decision(False)
             other = await session.get(User, target)
             if other is None:
-                raise RuleError("Пользователь не найден.")
+                raise RuleError(tr("err_user_not_found"))
             reverse = await session.scalar(
                 select(Reaction).where(
                     Reaction.from_user_id == target,
@@ -632,7 +680,7 @@ class Store:
         await self._actor(session, actor)
         match = await session.get(Match, match_id)
         if not match or actor not in (match.user_low_id, match.user_high_id):
-            raise RuleError("Взаимная симпатия не найдена или недоступна тебе.")
+            raise RuleError(tr("err_match_unavailable"))
         target = match.user_high_id if actor == match.user_low_id else match.user_low_id
         user = await session.get(User, target)
         blocked = await session.scalar(
@@ -645,7 +693,7 @@ class Store:
             or not await session.get(Profile, actor)
             or not await session.get(Profile, target)
         ):
-            raise RuleError("Эта взаимная симпатия сейчас недоступна.")
+            raise RuleError(tr("err_match_unavailable_now"))
         return user
 
     async def match_target(self, actor: int, match_id: int) -> User:
@@ -654,7 +702,7 @@ class Store:
 
     async def match_page(self, actor: int, page: int) -> list[tuple[Match, Profile]]:
         if not 0 <= page <= 1_000_000:
-            raise RuleError("Недопустимая страница.")
+            raise RuleError(tr("err_invalid_page"))
         async with self.db.sessions() as session:
             await self._actor(session, actor)
             if not await session.get(Profile, actor):
@@ -684,9 +732,9 @@ class Store:
     async def _moderation_target(self, session: AsyncSession, actor: int, target: int) -> None:
         await self._actor(session, actor)
         if actor == target or not await session.get(Profile, actor):
-            raise RuleError("Недопустимая анкета.")
+            raise RuleError(tr("err_invalid_profile"))
         if not await session.get(Profile, target):
-            raise RuleError("Анкета удалена.")
+            raise RuleError(tr("err_profile_deleted"))
         known = await session.scalar(
             select(Reaction.id).where(
                 pair_clause(Reaction.from_user_id, Reaction.to_user_id, actor, target)
@@ -702,7 +750,7 @@ class Store:
         )
         eligible = await session.scalar(self._candidates(actor).where(Profile.user_id == target))
         if not (known or matched or blocked or eligible):
-            raise RuleError("Действие с этой анкетой недоступно.")
+            raise RuleError(tr("err_profile_action_unavailable"))
 
     async def validate_target(self, actor: int, target: int) -> None:
         async with self.db.sessions() as session:
@@ -722,7 +770,7 @@ class Store:
 
     async def report(self, actor: int, target: int, reason: str) -> None:
         if not 1 <= len(reason) <= 320:
-            raise RuleError("Комментарий к жалобе слишком длинный или пустой.")
+            raise RuleError(tr("err_report_comment"))
         async with self.db.sessions.begin() as session:
             low, high = sorted((actor, target))
             await session.execute(select(func.pg_advisory_xact_lock(low, high)))
@@ -739,7 +787,7 @@ class Store:
 
     def require_admin(self, telegram_id: int) -> None:
         if telegram_id not in self.admin_ids:
-            raise RuleError("Этот раздел доступен только администратору.")
+            raise RuleError(tr("err_admin_only"))
 
     async def stats(self, telegram_id: int) -> tuple[int, int, int, int]:
         self.require_admin(telegram_id)
@@ -762,7 +810,7 @@ class Store:
     async def report_page(self, telegram_id: int, page: int) -> list[Report]:
         self.require_admin(telegram_id)
         if not 0 <= page <= 1_000_000:
-            raise RuleError("Недопустимая страница.")
+            raise RuleError(tr("err_invalid_page"))
         async with self.db.sessions() as session:
             return list(
                 await session.scalars(
@@ -781,7 +829,7 @@ class Store:
         async with self.db.sessions() as session:
             report = await session.get(Report, report_id)
             if not report:
-                raise RuleError("Жалоба не найдена.")
+                raise RuleError(tr("err_report_not_found"))
             return report, await session.get(Profile, report.reported_user_id)
 
     async def admin_action(self, telegram_id: int, report_id: int, action: str) -> None:
@@ -789,16 +837,16 @@ class Store:
         async with self.db.sessions.begin() as session:
             report = await session.get(Report, report_id)
             if not report or action not in {"ban", "unban", "review"}:
-                raise RuleError("Недопустимое действие или жалоба.")
+                raise RuleError(tr("err_invalid_action"))
             if action == "review":
                 admin = await session.scalar(select(User).where(User.telegram_id == telegram_id))
                 if not admin:
-                    raise RuleError("Сначала отправь /start.")
+                    raise RuleError(tr("err_send_start"))
                 report.status, report.reviewed_by = "reviewed", admin.id
             else:
                 user = await session.get(User, report.reported_user_id)
                 if user is None:
-                    raise RuleError("Пользователь не найден.")
+                    raise RuleError(tr("err_user_not_found"))
                 user.is_banned = action == "ban"
                 if action == "ban" and (profile := await session.get(Profile, user.id)):
                     profile.is_active = False
@@ -810,7 +858,7 @@ class Store:
         async with self.db.sessions.begin() as session:
             user = await session.scalar(select(User).where(User.telegram_id == target_telegram_id))
             if not user:
-                raise RuleError("Пользователь не найден.")
+                raise RuleError(tr("err_user_not_found"))
             user.is_banned = banned
             if banned and (profile := await session.get(Profile, user.id)):
                 profile.is_active = False
@@ -847,7 +895,7 @@ class Store:
         from bot.services.premium import PREMIUM_PLANS
 
         if plan_code not in PREMIUM_PLANS or source not in {"admin", "stars"}:
-            raise RuleError("Недопустимый план Premium.")
+            raise RuleError(tr("err_invalid_premium_plan"))
         if event_id:
             existing = await session.scalar(
                 select(PremiumGrant).where(PremiumGrant.event_id == event_id)
@@ -857,7 +905,7 @@ class Store:
 
         user = await session.scalar(select(User).where(User.id == user_id).with_for_update())
         if not user:
-            raise RuleError("Пользователь не найден.")
+            raise RuleError(tr("err_user_not_found"))
 
         granted_at = now or datetime.now(UTC)
         previous_until = user.premium_until
@@ -899,7 +947,7 @@ class Store:
                 )
                 if existing and existing.new_until:
                     return existing.new_until
-                raise RuleError("Событие Premium уже обработано.")
+                raise RuleError(tr("err_premium_event"))
         else:
             session.add(PremiumGrant(**grant_values))
 
@@ -922,7 +970,7 @@ class Store:
                 select(User).where(User.telegram_id == target_telegram_id)
             )
             if not target:
-                raise RuleError("Пользователь не найден.")
+                raise RuleError(tr("err_user_not_found"))
             admin_id = admin.id if admin else None
             target_id = target.id
         return await self.grant_premium(admin_id, target_id, plan_code, event_id)
@@ -932,7 +980,7 @@ class Store:
         async with self.db.sessions.begin() as session:
             user = await session.scalar(select(User).where(User.id == user_id).with_for_update())
             if not user:
-                raise RuleError("Пользователь не найден.")
+                raise RuleError(tr("err_user_not_found"))
 
             previous_until = user.premium_until
             user.premium_until = None
@@ -968,7 +1016,7 @@ class Store:
                 select(User).where(User.telegram_id == target_telegram_id)
             )
             if not target:
-                raise RuleError("Пользователь не найден.")
+                raise RuleError(tr("err_user_not_found"))
             admin_id = admin.id if admin else None
             target_id = target.id
         await self.revoke_premium(admin_id, target_id)
@@ -978,7 +1026,7 @@ class Store:
         async with self.db.sessions() as session:
             user = await session.scalar(select(User).where(User.telegram_id == target_telegram_id))
             if not user:
-                raise RuleError("Пользователь не найден.")
+                raise RuleError(tr("err_user_not_found"))
             status = premium_status(user)
             return {
                 "is_premium": status.is_premium,
@@ -991,7 +1039,7 @@ class Store:
         async with self.db.sessions.begin() as session:
             user = await session.get(User, user_id)
             if not user:
-                raise RuleError("Пользователь не найден.")
+                raise RuleError(tr("err_user_not_found"))
             user.show_premium_badge = not user.show_premium_badge
             return user.show_premium_badge
 
@@ -1000,10 +1048,10 @@ class Store:
         async with self.db.sessions.begin() as session:
             user = await session.scalar(select(User).where(User.id == actor).with_for_update())
             if not user or user.is_banned:
-                raise RuleError("Доступ ограничен. Доступны /help, /privacy и /delete.")
+                raise RuleError(tr("err_access_limited"))
             own_profile = await session.get(Profile, actor)
             if not own_profile or not own_profile.is_active or not user.username:
-                raise RuleError("Сначала создай анкету или снова сделай её видимой.")
+                raise RuleError(tr("err_create_or_show_profile"))
             target = await session.scalar(
                 select(Reaction.to_user_id)
                 .where(Reaction.from_user_id == actor, Reaction.kind == "pass")
@@ -1094,7 +1142,7 @@ class Store:
         async with self.db.sessions.begin() as session:
             user = await session.scalar(select(User).where(User.id == user_id).with_for_update())
             if not user:
-                raise RuleError("Пользователь не найден.")
+                raise RuleError(tr("err_user_not_found"))
 
             positions = set(
                 await session.scalars(
@@ -1107,11 +1155,14 @@ class Store:
             if existing_count >= limit:
                 if limit == FREE_PHOTO_LIMIT:
                     raise RuleError(
-                        f"Достигнут лимит фото ({limit}).\n\n"
-                        f"💎 Premium позволяет добавить до {PREMIUM_PHOTO_LIMIT} фото."
+                        tr(
+                            "err_photo_limit_premium",
+                            limit=limit,
+                            premium_limit=PREMIUM_PHOTO_LIMIT,
+                        )
                     )
                 else:
-                    raise RuleError(f"Достигнут лимит фото ({limit}).")
+                    raise RuleError(tr("err_photo_limit", limit=limit))
 
             # Reuse the lowest hole so delete/add cycles never exceed the DB's 0..4
             # position constraint.
@@ -1133,7 +1184,7 @@ class Store:
         async with self.db.sessions.begin() as session:
             user = await session.scalar(select(User).where(User.id == user_id).with_for_update())
             if not user:
-                raise RuleError("Пользователь не найден.")
+                raise RuleError(tr("err_user_not_found"))
             photo_count = await session.scalar(
                 select(func.count())
                 .select_from(ProfilePhoto)
@@ -1141,11 +1192,11 @@ class Store:
             )
 
             if photo_count is None or photo_count <= 1:
-                raise RuleError("Нельзя удалить единственное фото. Сначала добавь другое.")
+                raise RuleError(tr("err_last_photo"))
 
             photo = await session.get(ProfilePhoto, photo_id)
             if not photo or photo.user_id != user_id:
-                raise RuleError("Фото не найдено.")
+                raise RuleError(tr("err_photo_not_found"))
 
             was_primary = photo.is_primary
             await session.delete(photo)
@@ -1170,10 +1221,10 @@ class Store:
         async with self.db.sessions.begin() as session:
             user = await session.scalar(select(User).where(User.id == user_id).with_for_update())
             if not user:
-                raise RuleError("Пользователь не найден.")
+                raise RuleError(tr("err_user_not_found"))
             photo = await session.get(ProfilePhoto, photo_id)
             if not photo or photo.user_id != user_id:
-                raise RuleError("Фото не найдено.")
+                raise RuleError(tr("err_photo_not_found"))
 
             # Unset all other primary flags
             await session.execute(
@@ -1199,10 +1250,10 @@ class Store:
         async with self.db.sessions.begin() as session:
             user = await session.scalar(select(User).where(User.id == user_id).with_for_update())
             if not user:
-                raise RuleError("Пользователь не найден.")
+                raise RuleError(tr("err_user_not_found"))
 
             if not has_premium(user, now):
-                raise RuleError("Boost доступен только с Premium.")
+                raise RuleError(tr("err_boost_premium"))
 
             can_activate, error = await self._can_activate_boost_internal(session, user_id, now)
             if not can_activate:
@@ -1234,8 +1285,11 @@ class Store:
             hours_left = (last_boost.next_available_at - now).total_seconds() / 3600
             return (
                 False,
-                f"Boost можно активировать снова через {hours_left:.1f} ч.\n"
-                f"Следующая активация: {last_boost.next_available_at.strftime('%H:%M')} UTC.",
+                tr(
+                    "err_boost_cooldown",
+                    hours=f"{hours_left:.1f}",
+                    next_at=last_boost.next_available_at.strftime("%H:%M"),
+                ),
             )
 
         return True, ""
@@ -1245,10 +1299,10 @@ class Store:
         async with self.db.sessions() as session:
             user = await session.get(User, user_id)
             if not user:
-                return False, "Пользователь не найден."
+                return False, tr("err_user_not_found")
 
             if not has_premium(user, now):
-                return False, "Boost доступен только с Premium."
+                return False, tr("err_boost_premium")
 
             return await self._can_activate_boost_internal(session, user_id, now)
 
@@ -1290,16 +1344,16 @@ class Store:
         Returns list of (Profile, distance_km).
         """
         if sort_by not in {"time", "distance"}:
-            raise RuleError("Недопустимая сортировка.")
+            raise RuleError(tr("err_invalid_sort"))
 
         if not 0 <= page <= 1_000_000:
-            raise RuleError("Недопустимая страница.")
+            raise RuleError(tr("err_invalid_page"))
 
         async with self.db.sessions() as session:
             user = await self._actor(session, actor_id)
 
             if not has_premium(user):
-                raise RuleError("Список входящих лайков доступен только с Premium.")
+                raise RuleError(tr("err_incoming_premium"))
 
             own = aliased(Profile)
             has_locations = and_(

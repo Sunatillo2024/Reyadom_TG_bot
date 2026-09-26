@@ -63,6 +63,26 @@ def test_migration_on_empty_database_and_idempotent_upgrade():
                         "VALUES (880001, 'legacy', false, true, NOW())"
                     )
                 )
+                # A second legacy user keeps an anketa so the 0011 backfill has
+                # a profiles.consent_at row to copy onto the user.
+                await connection.execute(
+                    text(
+                        "INSERT INTO users "
+                        "(telegram_id, username, is_banned, show_premium_badge, created_at) "
+                        "VALUES (880002, 'legacy_anketa', false, true, NOW())"
+                    )
+                )
+                await connection.execute(
+                    text(
+                        "INSERT INTO profiles "
+                        "(user_id, name, age, gender, seeking, city, city_normalized, "
+                        "bio, photo_file_id, min_age, max_age, own_city_only, is_active, "
+                        "consent_at, updated_at) "
+                        "SELECT id, 'Legacy', 25, 'male', 'any', 'Toshkent', 'toshkent', "
+                        "'', 'photo', 18, 99, true, true, NOW(), NOW() "
+                        "FROM users WHERE telegram_id = 880002"
+                    )
+                )
         finally:
             await db.close()
 
@@ -101,7 +121,7 @@ def test_migration_on_empty_database_and_idempotent_upgrade():
                 )
                 assert {"users", "profiles", "reactions", "matches", "blocks", "reports"} <= tables
                 assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-                    "0009"
+                    "0012"
                 )
                 legacy = (
                     await connection.execute(
@@ -112,10 +132,24 @@ def test_migration_on_empty_database_and_idempotent_upgrade():
                     )
                 ).one()
                 assert legacy == (True, None, None)
-            legacy_store = Store(db, [], welcome_trial_enabled=True, welcome_trial_days=7)
-            synced = await legacy_store.sync_user_with_status(880_001, "legacy")
-            assert not synced.welcome_trial_granted
-            assert synced.user.trial_ends_at is None
+                # Migration 0011 backfills the consent flag from surviving profiles.
+                consented = (
+                    await connection.execute(
+                        text(
+                            "SELECT u.consent_at "
+                            "FROM users AS u JOIN profiles AS p ON p.user_id = u.id "
+                            "WHERE u.telegram_id = 880002"
+                        )
+                    )
+                ).one()
+                assert consented[0] is not None
+                assert await connection.scalar(
+                    text("SELECT consent_at FROM users WHERE telegram_id = 880001")
+                ) is None
+                legacy_store = Store(db, [], welcome_trial_enabled=True, welcome_trial_days=7)
+                synced = await legacy_store.sync_user_with_status(880_001, "legacy")
+                assert not synced.welcome_trial_granted
+                assert synced.user.trial_ends_at is None
         finally:
             await db.close()
 

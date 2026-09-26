@@ -66,7 +66,7 @@ def remove_keyboard() -> ReplyKeyboardRemove:
 def language_selection() -> InlineKeyboardMarkup:
     return inline(
         (("🇺🇿 O'zbekcha", "lang:uz"), ("🇷🇺 Русский", "lang:ru")),
-        (("🇬🇧 English", "lang:en"),),
+        (("🇬🇧 English", "lang:en"), ("🇰🇬 Кыргызча", "lang:kg")),
     )
 
 
