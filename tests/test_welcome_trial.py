@@ -1,13 +1,19 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock
 
+import pytest
+from aiogram.types import InlineKeyboardMarkup, Message
 from sqlalchemy import func, select
 
 from bot.db.models import PremiumGrant, PremiumPayment, User
+from bot.handlers.discovery import reminder_discover
+from bot.i18n import tr
+from bot.keyboards.common import discovery_reminder as discovery_reminder_keyboard
 from bot.services.payments import PaymentInput, PaymentService, order_payload
 from bot.services.premium import get_effective_premium_until, has_premium, premium_status
 from bot.services.store import Store
-from bot.services.welcome_trial import notification_text
+from bot.services.welcome_trial import notification_text, send_discovery_reminder
 
 
 def enabled_store(store: Store) -> Store:
@@ -154,6 +160,49 @@ async def test_disabled_trial_is_consumed_without_grant(store):
     assert not first.welcome_trial_granted
     assert not later.welcome_trial_granted
     assert later.user.trial_ends_at is None
+
+
+@pytest.mark.parametrize(
+    ("language", "expected_button"),
+    [
+        ("uz", "🔍 Nomzod qidirish"),
+        ("ru", "🔍 Искать анкеты"),
+        ("en", "🔍 Find candidates"),
+    ],
+)
+async def test_discovery_reminder_is_localized_and_text_only(
+    store, make_user, language, expected_button
+):
+    user = await make_user()
+    await store.set_language(user.id, language)
+    bot = type("BotStub", (), {"send_message": AsyncMock(return_value=object())})()
+
+    assert await send_discovery_reminder(bot, store, user.telegram_id)
+    bot.send_message.assert_awaited_once()
+    call = bot.send_message.await_args
+    assert call.args == (user.telegram_id, tr("discovery_reminder", language))
+    assert call.kwargs["reply_markup"] == discovery_reminder_keyboard(language)
+    assert isinstance(call.kwargs["reply_markup"], InlineKeyboardMarkup)
+    button = call.kwargs["reply_markup"].inline_keyboard[0][0]
+    assert button.text == expected_button
+    assert button.callback_data == "reminder:discover"
+    assert button.url is None
+    assert "photo" not in call.kwargs
+
+
+async def test_discovery_reminder_callback_opens_candidate_feed(
+    store, make_user, monkeypatch
+):
+    user = await make_user()
+    callback = type("CallbackStub", (), {"message": Message.model_construct()})()
+    state = AsyncMock()
+    show_next = AsyncMock(return_value=True)
+    monkeypatch.setattr("bot.handlers.discovery.show_next", show_next)
+
+    await reminder_discover(callback, state, store, user)
+    state.clear.assert_awaited_once()
+    show_next.assert_awaited_once_with(callback.message, state, store, user)
+    assert show_next.await_args.kwargs == {}
 
 
 async def test_trial_notifications_are_claimed_only_once(store):

@@ -121,6 +121,11 @@ async def help_message(message: Message) -> None:
     await message.answer(tr("help"))
 
 
+@router.message(F.text.in_(localized_labels("menu_creator")))
+async def creator_message(message: Message) -> None:
+    await message.answer(tr("creator_message"))
+
+
 @router.message(Command("privacy"))
 async def privacy(message: Message) -> None:
     await message.answer(tr("privacy") + tr("delete_notice"))

@@ -21,7 +21,12 @@ _COMMON: Final = {
     "menu_settings": "⚙️ Настройки",
     "menu_premium": "💎 Premium",
     "menu_help": "❔ Помощь",
+    "menu_creator": "🛠 Создатель",
     "menu_placeholder": "Выбери действие 💜",
+    "creator_message": (
+        "🛠 Создатель бота: @drf_2026\n\n"
+        "Если в Telegram возникнут вопросы или проблемы, смело пишите!"
+    ),
     "home": "<b>💜 Хорошо, что ты здесь!</b>\nПосмотри анкеты или загляни в свои симпатии.",
     "profile_missing": "Анкета не найдена. Создай её с помощью /start.",
     "profile_photo_error": ("Не удалось открыть прежнюю фотографию. Нажми «Фото» и загрузи новую."),
@@ -102,7 +107,12 @@ _UZ: Final = {
     "menu_settings": "⚙️ Sozlamalar",
     "menu_premium": "💎 Premium",
     "menu_help": "❔ Yordam",
+    "menu_creator": "🛠 Yaratuvchisi",
     "menu_placeholder": "Amalni tanlang 💜",
+    "creator_message": (
+        "🛠 Bot yaratuvchisi: @drf_2026\n\n"
+        "Telegram’da qandaydir muammo yoki savol bo‘lsa, bemalol yozishingiz mumkin!"
+    ),
     "home": (
         "<b>💜 Yaxshi, bu yerdasan!</b>\n"
         "Profil ko'rib chiqing yoki o'zaro simpatiyalaringizga o'ting."
@@ -186,7 +196,12 @@ _EN: Final = {
     "menu_settings": "⚙️ Settings",
     "menu_premium": "💎 Premium",
     "menu_help": "❔ Help",
+    "menu_creator": "🛠 Creator",
     "menu_placeholder": "Choose an action 💜",
+    "creator_message": (
+        "🛠 Bot creator: @drf_2026\n\n"
+        "If you have any questions or run into an issue on Telegram, feel free to message me!"
+    ),
     "home": "<b>💜 Great to see you!</b>\nBrowse profiles or check your matches.",
     "profile_missing": "Profile not found. Create it with /start.",
     "profile_photo_error": "Could not open the previous photo. Upload a new one from Photo.",
@@ -1168,6 +1183,8 @@ _RU_EXTRA.update(
             "<b>Сейчас подходящих анкет нет 💜</b>\n"
             "Попробуй изменить настройки поиска или загляни позже."
         ),
+        "discovery_reminder": "💜 Время для новых знакомств! Посмотри анкеты рядом.",
+        "discovery_reminder_button": "🔍 Искать анкеты",
         "no_likes": "<b>Пока нет новых лайков 💌</b>\nА пока можно посмотреть анкеты.",
         "trial_welcome": (
             "🎁 Вам доступен Premium бесплатно на {days} дней!\n\n"
@@ -1206,6 +1223,8 @@ _UZ.update(
             "<b>Hozircha mos profil yo'q 💜</b>\n"
             "Qidiruv sozlamalarini o'zgartirib ko'ring yoki keyinroq qaytib keling."
         ),
+        "discovery_reminder": "💜 Yangi tanishuvlar vaqti! Yaqin atrofdagi profillarni ko'ring.",
+        "discovery_reminder_button": "🔍 Nomzod qidirish",
         "no_likes": (
             "<b>Hozircha yangi like yo'q 💌</b>\n"
             "Ayni damda profillarni ko'rib chiqishingiz mumkin."
@@ -1248,6 +1267,8 @@ _EN.update(
             "<b>No suitable profiles right now 💜</b>\n"
             "Try changing your search settings or come back later."
         ),
+        "discovery_reminder": "💜 Time for new connections! Browse profiles nearby.",
+        "discovery_reminder_button": "🔍 Find candidates",
         "no_likes": "<b>No new likes yet 💌</b>\nMeanwhile you can browse profiles.",
         "trial_welcome": (
             "🎁 You have free Premium for {days} days!\n\n"
@@ -2135,7 +2156,12 @@ _KG: Final = {
     "menu_settings": "⚙️ Жөндөөлөр",
     "menu_premium": "💎 Premium",
     "menu_help": "❔ Жардам",
+    "menu_creator": "🛠 Автор",
     "menu_placeholder": "Аракетти тандаңыз 💜",
+    "creator_message": (
+        "🛠 Боттун автору: @drf_2026\n\n"
+        "Telegram'да көйгөй же суроо болсо, эркин жазыңыз!"
+    ),
     "home": (
         "<b>💜 Бул жерде экениңиз жакшы!</b>\n"
         "Анкеталарды көрүңүз же озара жактырууларыңызга кириңиз."
@@ -2144,6 +2170,8 @@ _KG: Final = {
     "profile_photo_error": "Мурунку сүрөттү ачуу мүмкүн болбоду. «Сүрөт» басып, жаңысын жүктөңүз.",  # noqa: E501
     "profile_status_active": "<b>Анкета статусу:</b> активдүү",
     "profile_status_hidden": "<b>Анкета статусу:</b> жашырылган",
+    "discovery_reminder": "💜 Жаңы таанышуулар убактысы! Жакынкы анкеталарды көрүңүз.",
+    "discovery_reminder_button": "🔍 Талапкерлерди издөө",
     "location_set": "көрсөтүлгөн",
     "location_unset": "көрсөтүлгөн эмес",
     "search_settings": (
@@ -2806,6 +2834,7 @@ def localized_labels(key: str) -> set[str]:
         "menu_settings": 4,
         "menu_premium": 5,
         "menu_help": 6,
+        "menu_creator": 7,
     }
     values = {translations[key] for translations in TRANSLATIONS.values()}
     values.update(MENU_LABEL_ALIASES[indexes[key]])

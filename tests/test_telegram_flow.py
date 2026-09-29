@@ -223,6 +223,9 @@ async def test_full_dispatcher_flow_offline(store, make_user, monkeypatch):
         assert "1 фото  →  <b>до 5 фото</b>" in last_text()
         await feed(text=MENU_LABELS[6])
         assert "❔ Помощь" in last_text()
+        await feed(text=MENU_LABELS[7])
+        assert "@drf_2026" in last_text()
+        assert "смело пишите" in last_text()
         # The previous Russian help button remains routable too.
         await feed(text=PREVIOUS_MENU_LABELS[6])
         assert "❔ Помощь" in last_text()

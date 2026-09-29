@@ -6,9 +6,26 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
 
 from bot.i18n import tr
+from bot.keyboards.common import discovery_reminder as discovery_reminder_keyboard
 from bot.services.store import Store, TrialNotification
+from bot.services.telegram import safe_call
 
 logger = logging.getLogger(__name__)
+
+
+async def send_discovery_reminder(bot: Bot, store: Store, telegram_id: int) -> bool:
+    """Send the localized text-only discovery reminder to one Telegram user."""
+    language = await store.language_of(telegram_id)
+    sent = await safe_call(
+        store,
+        telegram_id,
+        lambda: bot.send_message(
+            telegram_id,
+            tr("discovery_reminder", language),
+            reply_markup=discovery_reminder_keyboard(language),
+        ),
+    )
+    return sent is not None
 
 
 def notification_text(notification: TrialNotification, language: str | None = None) -> str:

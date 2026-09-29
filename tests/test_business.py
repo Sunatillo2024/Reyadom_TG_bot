@@ -18,6 +18,8 @@ from sqlalchemy.exc import IntegrityError
 
 from bot.db.database import Database
 from bot.db.models import Block, Match, Profile, Reaction, Report, User, utcnow
+from bot.handlers.start import creator_message
+from bot.i18n import current_language, tr
 from bot.keyboards.common import decisions, inline, menu
 from bot.services.store import Store
 from bot.services.telegram import caption, contact_url, notify_decision
@@ -66,6 +68,29 @@ def test_city_and_html():
     assert caption(profile) == "<b>&lt;Ali&gt;, 25</b>\n📍 A&amp;B\n\n&lt;b&gt;Salom&lt;/b&gt;"
 
 
+@pytest.mark.parametrize(
+    ("language", "button_label"),
+    [
+        ("uz", "🛠 Yaratuvchisi"),
+        ("ru", "🛠 Создатель"),
+        ("en", "🛠 Creator"),
+        ("kg", "🛠 Автор"),
+    ],
+)
+async def test_creator_menu_button_and_message_are_localized(language, button_label):
+    message = SimpleNamespace(answer=AsyncMock())
+    token = current_language.set(language)
+    try:
+        markup = menu()
+        assert markup.keyboard[-1][0].text == button_label
+        await creator_message(message)
+    finally:
+        current_language.reset(token)
+
+    message.answer.assert_awaited_once_with(tr("creator_message", language))
+    assert "@drf_2026" in message.answer.await_args.args[0]
+
+
 def test_ui_labels_callbacks_and_button_styles_are_serialized():
     markup = menu()
     assert [[button.text for button in row] for row in markup.keyboard] == [
@@ -74,6 +99,7 @@ def test_ui_labels_callbacks_and_button_styles_are_serialized():
         [MENU_LABELS[3]],
         [MENU_LABELS[4], MENU_LABELS[5]],
         [MENU_LABELS[6]],
+        [MENU_LABELS[7]],
     ]
     assert markup.input_field_placeholder == "Выбери действие 💜"
     serialized_menu = markup.model_dump(exclude_none=True)

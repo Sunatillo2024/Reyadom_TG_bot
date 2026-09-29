@@ -35,7 +35,16 @@ def inline(*rows: tuple[ButtonSpec, ...]) -> InlineKeyboardMarkup:
 def menu() -> ReplyKeyboardMarkup:
     labels = [
         tr(f"menu_{key}")
-        for key in ("discover", "profile", "likes", "matches", "settings", "premium", "help")
+        for key in (
+            "discover",
+            "profile",
+            "likes",
+            "matches",
+            "settings",
+            "premium",
+            "help",
+            "creator",
+        )
     ]
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -44,6 +53,7 @@ def menu() -> ReplyKeyboardMarkup:
             [KeyboardButton(text=labels[3])],
             [KeyboardButton(text=labels[4]), KeyboardButton(text=labels[5])],
             [KeyboardButton(text=labels[6])],
+            [KeyboardButton(text=labels[7])],
         ],
         resize_keyboard=True,
         input_field_placeholder=tr("menu_placeholder"),
@@ -72,6 +82,10 @@ def language_selection() -> InlineKeyboardMarkup:
 
 def language_continue(label: str) -> InlineKeyboardMarkup:
     return inline(((label, "home"),))
+
+
+def discovery_reminder(language: str | None = None) -> InlineKeyboardMarkup:
+    return inline(((tr("discovery_reminder_button", language), "reminder:discover"),))
 
 
 def home() -> InlineKeyboardMarkup:

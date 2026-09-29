@@ -14,6 +14,7 @@ MENU_LABELS = (
     "⚙️ Настройки",
     "💎 Premium",
     "❔ Помощь",
+    "🛠 Создатель",
 )
 
 # Reply keyboards remain in Telegram chats after an interface update. Keep every
@@ -26,6 +27,7 @@ PREVIOUS_MENU_LABELS = (
     "⚙️ Настройки поиска",
     "💎 Premium",  # Added for compatibility
     "❓ Помощь",
+    "🛠 Автор",
 )
 LEGACY_MENU_LABELS = (
     "🔎 Anketalarni ko'rish",
@@ -35,6 +37,7 @@ LEGACY_MENU_LABELS = (
     "⚙️ Qidiruv sozlamalari",
     "💎 Premium",  # Added for compatibility
     "❓ Yordam",
+    "🛠 Yaratuvchisi",
 )
 MENU_LABEL_ALIASES = tuple(
     frozenset((current, previous, legacy))

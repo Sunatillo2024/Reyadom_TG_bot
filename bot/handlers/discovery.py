@@ -162,6 +162,16 @@ async def incoming(callback: CallbackQuery, state: FSMContext, store: Store, use
         await show_next(callback.message, state, store, user, True)
 
 
+@router.callback_query(F.data == "reminder:discover")
+async def reminder_discover(
+    callback: CallbackQuery, state: FSMContext, store: Store, user: User
+) -> None:
+    """Open the discovery feed from a reminder button."""
+    await state.clear()
+    if isinstance(callback.message, Message):
+        await show_next(callback.message, state, store, user)
+
+
 @router.callback_query(F.data == "undo:pass")
 async def undo_pass(callback: CallbackQuery, state: FSMContext, store: Store, user: User) -> None:
     if not isinstance(callback.message, Message):
